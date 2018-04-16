@@ -3,7 +3,6 @@ package internal
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 )
 
@@ -59,7 +58,6 @@ func (n *Node) requestLoop() {
 				return
 			}
 
-			fmt.Printf("Processing request batch: %+v\n", reqBatch)
 			n.processRequestBatch(reqBatch)
 		}
 	}
@@ -83,7 +81,6 @@ func (n *Node) processRequestBatch(reqBatch *requestBatch) {
 		}
 
 		// TODO add publish timeout
-		fmt.Printf("WROTE %+v\n", resp)
 		reqBatch.responseChan <- resp
 	}
 	close(reqBatch.responseChan)

@@ -3,7 +3,6 @@ package memcache
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -18,7 +17,40 @@ var (
 	ErrInvalidClientConfig = errors.New("Invalid client configuration")
 	ErrNoResult            = errors.New("No result")
 	ErrClientShutdown      = errors.New("Client shutdown")
+
+	ErrKeyNotFound                   = errors.New("Key not found")
+	ErrKeyExists                     = errors.New("Key exists")
+	ErrValueTooLarge                 = errors.New("Value too large")
+	ErrInvalidArguments              = errors.New("Invalid arguments")
+	ErrItemNotStored                 = errors.New("Item not stored")
+	ErrIncrOnNonNumericValue         = errors.New("Incr on non-numeric value")
+	ErrVBucketBelongsToAnotherServer = errors.New("VBucket belongs to another server")
+	ErrAuthenticationError           = errors.New("Authentication error")
+	ErrUnknownCommand                = errors.New("Unknown command")
+	ErrOutOfMemory                   = errors.New("Out of memory")
+	ErrNotSupported                  = errors.New("Not supported")
+	ErrInternalError                 = errors.New("Internal error")
+	ErrBusy                          = errors.New("Busy")
+	ErrTemporaryFailure              = errors.New("Temporary failure")
 )
+
+var statusCodeToErr = map[uint16]error{
+	internal.StatusNoError:                       nil,
+	internal.StatusKeyNotFound:                   ErrKeyNotFound,
+	internal.StatusKeyExists:                     ErrKeyExists,
+	internal.StatusValueTooLarge:                 ErrValueTooLarge,
+	internal.StatusInvalidArguments:              ErrInvalidArguments,
+	internal.StatusItemNotStored:                 ErrItemNotStored,
+	internal.StatusIncrOnNonNumericValue:         ErrIncrOnNonNumericValue,
+	internal.StatusVBucketBelongsToAnotherServer: ErrVBucketBelongsToAnotherServer,
+	internal.StatusAuthenticationError:           ErrAuthenticationError,
+	internal.StatusUnknownCommand:                ErrUnknownCommand,
+	internal.StatusOutOfMemory:                   ErrOutOfMemory,
+	internal.StatusNotSupported:                  ErrNotSupported,
+	internal.StatusInternalError:                 ErrInternalError,
+	internal.StatusBusy:                          ErrBusy,
+	internal.StatusTemporaryFailure:              ErrTemporaryFailure,
+}
 
 // Client implements a memcache client that uses the binary protocol
 type Client struct {
@@ -80,18 +112,24 @@ func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 	return c, nil
 }
 
-// SetWithExpiry SETs a keyvalue pair with expiry
-func (c *Client) SetWithExpiry(ctx context.Context, key []byte, value []byte, expiry time.Duration) error {
-	fmt.Println("HERE")
-	extras := c.bufPool.GetBuf()
-	extras.WriteUint32(0)
-	extras.WriteUint32(uint32(expiry / time.Second))
-	_, err := c.makeRequest(ctx, internal.OpSet, key, value, extras.Bytes())
-	c.bufPool.PutBuf(extras)
-	return err
+// Set performs a SET operation
+func (c *Client) Set(ctx context.Context, key, value []byte) error {
+	return c.SetWithExpiry(ctx, key, value, 0*time.Second)
 }
 
-// Get GETs a single keyvalue pair
+// SetWithExpiry performs a SET with the specified expiry
+func (c *Client) SetWithExpiry(ctx context.Context, key []byte, value []byte, expiry time.Duration) error {
+	extras := c.buildExtras(0, expiry)
+	resp, err := c.makeRequest(ctx, internal.OpSet, key, value, extras.Bytes())
+	c.bufPool.PutBuf(extras)
+
+	if err != nil {
+		return err
+	}
+	return statusCodeToErr[resp.StatusCode]
+}
+
+// Get performas a GET for the given key
 func (c *Client) Get(ctx context.Context, key []byte) ([]byte, error) {
 	resp, err := c.makeRequest(ctx, internal.OpGet, key, nil, nil)
 	if err != nil {
@@ -100,6 +138,8 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, error) {
 	return resp.Value, nil
 }
 
+// Close closes all connections to the remote nodes and cancels any pending requests
+// The client is not usable after this operation
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -116,6 +156,13 @@ func (c *Client) Close() error {
 		})
 		return nil
 	}
+}
+
+func (c *Client) buildExtras(flags uint32, expiry time.Duration) *internal.Buf {
+	extras := c.bufPool.GetBuf()
+	extras.WriteUint32(flags)
+	extras.WriteUint32(uint32(expiry / time.Second))
+	return extras
 }
 
 func (c *Client) makeRequest(ctx context.Context, opCode uint8, key, value, extras []byte) (*internal.Response, error) {
@@ -139,7 +186,6 @@ func (c *Client) makeRequest(ctx context.Context, opCode uint8, key, value, extr
 
 	// send the request
 	respChan := make(chan *internal.Response, 1)
-	fmt.Printf("RESP CHAN: %+v\n", respChan)
 	if err := node.Send(ctx, respChan, &internal.Request{OpCode: opCode, Key: key, Value: value, Extras: extras}); err != nil {
 		close(respChan)
 		return nil, err
@@ -148,10 +194,8 @@ func (c *Client) makeRequest(ctx context.Context, opCode uint8, key, value, extr
 	// wait for response
 	select {
 	case <-ctx.Done():
-		fmt.Println("Context expiry")
 		return nil, ctx.Err()
 	case resp, ok := <-respChan:
-		fmt.Println("GOT RESPONSE")
 		if !ok {
 			return nil, ErrNoResult
 		}
