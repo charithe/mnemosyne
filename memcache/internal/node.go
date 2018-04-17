@@ -70,6 +70,7 @@ func (n *Node) processRequestBatch(reqBatch *requestBatch) {
 			continue
 		}
 
+		// TODO This is not correct
 		if IsQuietCommand(req.OpCode) {
 			continue
 		}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charithe/mnemosyne/memcache/internal"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -120,22 +121,34 @@ func (c *Client) Set(ctx context.Context, key, value []byte) error {
 // SetWithExpiry performs a SET with the specified expiry
 func (c *Client) SetWithExpiry(ctx context.Context, key []byte, value []byte, expiry time.Duration) error {
 	extras := c.buildExtras(0, expiry)
-	resp, err := c.makeRequest(ctx, internal.OpSet, key, value, extras.Bytes())
+	req := &internal.Request{
+		OpCode: internal.OpSet,
+		Key:    key,
+		Value:  value,
+		Extras: extras.Bytes(),
+	}
+
+	resp, err := c.distributeRequests(ctx, req)
 	c.bufPool.PutBuf(extras)
 
 	if err != nil {
 		return err
 	}
-	return statusCodeToErr[resp.StatusCode]
+	return statusCodeToErr[resp[0].StatusCode]
 }
 
-// Get performas a GET for the given key
+// Get performs a GET for the given key
 func (c *Client) Get(ctx context.Context, key []byte) ([]byte, error) {
-	resp, err := c.makeRequest(ctx, internal.OpGet, key, nil, nil)
-	if err != nil {
+	req := &internal.Request{
+		OpCode: internal.OpGet,
+		Key:    key,
+	}
+
+	resp, err := c.distributeRequests(ctx, req)
+	if err != nil || resp == nil {
 		return nil, err
 	}
-	return resp.Value, nil
+	return resp[0].Value, nil
 }
 
 // Close closes all connections to the remote nodes and cancels any pending requests
@@ -165,7 +178,7 @@ func (c *Client) buildExtras(flags uint32, expiry time.Duration) *internal.Buf {
 	return extras
 }
 
-func (c *Client) makeRequest(ctx context.Context, opCode uint8, key, value, extras []byte) (*internal.Response, error) {
+func (c *Client) distributeRequests(ctx context.Context, requests ...*internal.Request) ([]*internal.Response, error) {
 	// ensure that the client is not shutdown
 	select {
 	case <-c.shutdownChan:
@@ -173,43 +186,134 @@ func (c *Client) makeRequest(ctx context.Context, opCode uint8, key, value, extr
 	default:
 	}
 
-	// esnure that the context is not cancelled
+	// ensure that the context hasn't expired
 	if err := ctx.Err(); err != nil {
-		return nil, nil
+		return nil, err
 	}
 
-	// determine the node
-	node, err := c.getNode(ctx, key)
+	// if there's only one request, no need to deal with errgroups
+	if len(requests) == 1 {
+		nodeID := c.nodePicker.Pick(requests[0].Key)
+		return c.sendToNode(ctx, nodeID, requests[0])
+	}
+
+	// group requests by node
+	batches := make(map[string][]*internal.Request)
+	for _, req := range requests {
+		nodeID := c.nodePicker.Pick(req.Key)
+		batches[nodeID] = append(batches[nodeID], req)
+	}
+
+	// send the requests to nodes in parallel
+	g, newCtx := errgroup.WithContext(ctx)
+	respChan := make(chan []*internal.Response, len(batches))
+	for nodeID, batch := range batches {
+		n := nodeID
+		b := batch
+		g.Go(func() error {
+			r, err := c.sendToNode(newCtx, n, b...)
+			if err != nil {
+				return err
+			}
+			respChan <- r
+			return nil
+		})
+	}
+
+	err := g.Wait()
+	close(respChan)
 	if err != nil {
 		return nil, err
 	}
 
-	// send the request
-	respChan := make(chan *internal.Response, 1)
-	if err := node.Send(ctx, respChan, &internal.Request{OpCode: opCode, Key: key, Value: value, Extras: extras}); err != nil {
+	// join up all the responses
+	var finalResponses []*internal.Response
+	for resp := range respChan {
+		finalResponses = append(finalResponses, resp...)
+	}
+	return finalResponses, nil
+}
+
+func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*internal.Request) ([]*internal.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	node, err := c.getNode(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+
+	respChan := make(chan *internal.Response, len(requests))
+	if err := node.Send(ctx, respChan, requests...); err != nil {
 		close(respChan)
 		return nil, err
 	}
 
-	// wait for response
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case resp, ok := <-respChan:
-		if !ok {
-			return nil, ErrNoResult
-		}
-
-		if resp.Err != nil {
-			return nil, resp.Err
-		}
-
-		return resp, nil
+	var responses []*internal.Response
+	for resp := range respChan {
+		responses = append(responses, resp)
 	}
+	return responses, nil
 }
 
-func (c *Client) getNode(ctx context.Context, key []byte) (*internal.Node, error) {
-	nodeID := c.nodePicker.Pick(key)
+//func (c *Client) makeRequests(ctx context.Context, requests ...*internal.Request) (*internal.Response, error) {
+//	// ensure that the client is not shutdown
+//	select {
+//	case <-c.shutdownChan:
+//		return nil, ErrClientShutdown
+//	default:
+//	}
+//
+//	// esnure that the context is not cancelled
+//	if err := ctx.Err(); err != nil {
+//		return nil, nil
+//	}
+//
+//	reqBatches := make(map[string][]*internal.Request)
+//	for _, req := range requests {
+//		nodeID := c.nodePicker.Pick(req.Key)
+//		reqBatches[nodeID] = append(reqBatches[nodeID], req)
+//	}
+//
+//	g := errgroup.WithContext(ctx)
+//	for nodeID, batch := range reqBatches {
+//		node, err := c.getNode(ctx, nodeID)
+//		if err != nil {
+//			return nil, err
+//		}
+//		// send the request
+//		respChan := make(chan *internal.Response, len(batch))
+//		g.Go(func() error {
+//			if err := node.Send(ctx, respChan, &internal.Request{OpCode: opCode, Key: key, Value: value, Extras: extras}); err != nil {
+//				close(respChan)
+//				return err
+//			}
+//
+//			for resp := range respChan {
+//
+//			}
+//		})
+//	}
+//
+//	// wait for response
+//	select {
+//	case <-ctx.Done():
+//		return nil, ctx.Err()
+//	case resp, ok := <-respChan:
+//		if !ok {
+//			return nil, ErrNoResult
+//		}
+//
+//		if resp.Err != nil {
+//			return nil, resp.Err
+//		}
+//
+//		return resp, nil
+//	}
+//}
+
+func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, error) {
 	node, ok := c.nodes.Load(nodeID)
 	if ok {
 		return node.(*internal.Node), nil
