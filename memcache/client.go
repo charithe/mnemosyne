@@ -53,10 +53,48 @@ var statusCodeToErr = map[uint16]error{
 	internal.StatusTemporaryFailure:              ErrTemporaryFailure,
 }
 
-type KV struct {
-	Key   []byte
-	Value []byte
-	Err   error
+// Result represents a result from a single operation
+type Result struct {
+	response *internal.Response
+}
+
+func (r *Result) Key() []byte {
+	return r.response.Key
+}
+
+func (r *Result) Value() []byte {
+	return r.response.Value
+}
+
+func (r *Result) CAS() uint64 {
+	return r.response.CAS
+}
+
+func (r *Result) Err() error {
+	if r.response.Err != nil {
+		return r.response.Err
+	}
+
+	return statusCodeToErr[r.response.StatusCode]
+}
+
+// MutationOpt is an optional modification to apply to the request
+type MutationOpt func(req *internal.Request)
+
+// WithExpiry sets an expiry time for the key being mutated
+func WithExpiry(expiry time.Duration) MutationOpt {
+	return func(req *internal.Request) {
+		extras := internal.NewBuf()
+		extras.WriteUint32(0)
+		extras.WriteUint32(uint32(expiry.Seconds()))
+		req.Extras = extras.Bytes()
+	}
+}
+
+func WithCASValue(cas uint64) MutationOpt {
+	return func(req *internal.Request) {
+		req.CAS = cas
+	}
 }
 
 // Client implements a memcache client that uses the binary protocol
@@ -119,34 +157,44 @@ func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 	return c, nil
 }
 
-// Set performs a SET operation
-func (c *Client) Set(ctx context.Context, key, value []byte) error {
-	return c.SetWithExpiry(ctx, key, value, 0*time.Second)
+// Set inserts or overwrites the value pointed to by the key
+func (c *Client) Set(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (*Result, error) {
+	return c.doMutation(ctx, internal.OpSet, key, value, mutationOpts...)
 }
 
-// SetWithExpiry performs a SET with the specified expiry
-func (c *Client) SetWithExpiry(ctx context.Context, key []byte, value []byte, expiry time.Duration) error {
-	extras := c.buildExtras(0, expiry)
-	req := &internal.Request{
-		OpCode: internal.OpSet,
-		Key:    key,
-		Value:  value,
-		Extras: extras.Bytes(),
+// Add inserts the value iff the key doesn't already exist
+func (c *Client) Add(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (*Result, error) {
+	return c.doMutation(ctx, internal.OpAdd, key, value, mutationOpts...)
+}
+
+// Replace overwrites the value iff the key already exists
+func (c *Client) Replace(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (*Result, error) {
+	return c.doMutation(ctx, internal.OpReplace, key, value, mutationOpts...)
+}
+
+// helper for mutations (SET, ADD, REPLACE)
+func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) (*Result, error) {
+	req := &internal.Request{OpCode: opCode, Key: key, Value: value}
+	for _, mo := range mutationOpts {
+		mo(req)
+	}
+
+	// extras are required
+	if req.Extras == nil {
+		WithExpiry(0 * time.Hour)(req)
 	}
 
 	resp, err := c.makeRequests(ctx, req)
-	c.bufPool.PutBuf(extras)
-
-	if err != nil {
-		return err
+	if err != nil || resp == nil {
+		return nil, err
 	}
-	return statusCodeToErr[resp[0].StatusCode]
+	return &Result{response: resp[0]}, nil
 }
 
 // Get performs a GET for the given key
-func (c *Client) Get(ctx context.Context, key []byte) ([]byte, error) {
+func (c *Client) Get(ctx context.Context, key []byte) (*Result, error) {
 	req := &internal.Request{
-		OpCode: internal.OpGet,
+		OpCode: internal.OpGetK,
 		Key:    key,
 	}
 
@@ -154,18 +202,18 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, error) {
 	if err != nil || resp == nil {
 		return nil, err
 	}
-	return resp[0].Value, nil
+	return &Result{response: resp[0]}, nil
 }
 
 // MultiGet performs a lookup for a set of keys and returns the found values
-func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]*KV, error) {
+func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]*Result, error) {
 	// we can short-circuit a lot of code if there's only one key to lookup
 	if len(keys) == 1 {
-		val, err := c.Get(ctx, keys[0])
+		result, err := c.Get(ctx, keys[0])
 		if err != nil {
 			return nil, err
 		}
-		return []*KV{&KV{Key: keys[0], Value: val}}, nil
+		return []*Result{result}, nil
 	}
 
 	groups := make(map[string][]*internal.Request)
@@ -187,13 +235,9 @@ func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]*KV, error) {
 		return nil, err
 	}
 
-	results := make([]*KV, len(responses))
+	results := make([]*Result, len(responses))
 	for i, r := range responses {
-		if r.Err == nil {
-			results[i] = &KV{Key: r.Key, Value: r.Value}
-		} else {
-			results[i] = &KV{Key: r.Key, Err: r.Err}
-		}
+		results[i] = &Result{response: r}
 	}
 
 	return results, nil
@@ -217,14 +261,6 @@ func (c *Client) Close() error {
 		})
 		return nil
 	}
-}
-
-// build the extras for the request
-func (c *Client) buildExtras(flags uint32, expiry time.Duration) *internal.Buf {
-	extras := c.bufPool.GetBuf()
-	extras.WriteUint32(flags)
-	extras.WriteUint32(uint32(expiry / time.Second))
-	return extras
 }
 
 // decide on how the requests should be made
