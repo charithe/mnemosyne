@@ -53,6 +53,12 @@ var statusCodeToErr = map[uint16]error{
 	internal.StatusTemporaryFailure:              ErrTemporaryFailure,
 }
 
+type KV struct {
+	Key   []byte
+	Value []byte
+	Err   error
+}
+
 // Client implements a memcache client that uses the binary protocol
 type Client struct {
 	connector    Connector
@@ -128,7 +134,7 @@ func (c *Client) SetWithExpiry(ctx context.Context, key []byte, value []byte, ex
 		Extras: extras.Bytes(),
 	}
 
-	resp, err := c.distributeRequests(ctx, req)
+	resp, err := c.makeRequests(ctx, req)
 	c.bufPool.PutBuf(extras)
 
 	if err != nil {
@@ -144,11 +150,53 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, error) {
 		Key:    key,
 	}
 
-	resp, err := c.distributeRequests(ctx, req)
+	resp, err := c.makeRequests(ctx, req)
 	if err != nil || resp == nil {
 		return nil, err
 	}
 	return resp[0].Value, nil
+}
+
+// MultiGet performs a lookup for a set of keys and returns the found values
+func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]*KV, error) {
+	// we can short-circuit a lot of code if there's only one key to lookup
+	if len(keys) == 1 {
+		val, err := c.Get(ctx, keys[0])
+		if err != nil {
+			return nil, err
+		}
+		return []*KV{&KV{Key: keys[0], Value: val}}, nil
+	}
+
+	groups := make(map[string][]*internal.Request)
+	for _, k := range keys {
+		nodeID := c.nodePicker.Pick(k)
+
+		// If there is more than one request to the node, we can make the previous GET a quiet one to save on network roundtrips
+		grp := groups[nodeID]
+		grpSize := len(grp)
+		if grpSize > 0 {
+			grp[grpSize-1].OpCode = internal.OpGetKQ
+		}
+
+		groups[nodeID] = append(grp, &internal.Request{OpCode: internal.OpGetK, Key: k})
+	}
+
+	responses, err := c.distributeRequests(ctx, groups)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]*KV, len(responses))
+	for i, r := range responses {
+		if r.Err == nil {
+			results[i] = &KV{Key: r.Key, Value: r.Value}
+		} else {
+			results[i] = &KV{Key: r.Key, Err: r.Err}
+		}
+	}
+
+	return results, nil
 }
 
 // Close closes all connections to the remote nodes and cancels any pending requests
@@ -171,6 +219,7 @@ func (c *Client) Close() error {
 	}
 }
 
+// build the extras for the request
 func (c *Client) buildExtras(flags uint32, expiry time.Duration) *internal.Buf {
 	extras := c.bufPool.GetBuf()
 	extras.WriteUint32(flags)
@@ -178,7 +227,8 @@ func (c *Client) buildExtras(flags uint32, expiry time.Duration) *internal.Buf {
 	return extras
 }
 
-func (c *Client) distributeRequests(ctx context.Context, requests ...*internal.Request) ([]*internal.Response, error) {
+// decide on how the requests should be made
+func (c *Client) makeRequests(ctx context.Context, requests ...*internal.Request) ([]*internal.Response, error) {
 	// ensure that the client is not shutdown
 	select {
 	case <-c.shutdownChan:
@@ -191,23 +241,31 @@ func (c *Client) distributeRequests(ctx context.Context, requests ...*internal.R
 		return nil, err
 	}
 
-	// if there's only one request, no need to deal with errgroups
+	// don't bother with goroutines if there's only a single request
 	if len(requests) == 1 {
 		nodeID := c.nodePicker.Pick(requests[0].Key)
 		return c.sendToNode(ctx, nodeID, requests[0])
 	}
 
-	// group requests by node
+	groups := c.groupRequests(requests...)
+	return c.distributeRequests(ctx, groups)
+}
+
+// group requests by destination node
+func (c *Client) groupRequests(requests ...*internal.Request) map[string][]*internal.Request {
 	batches := make(map[string][]*internal.Request)
 	for _, req := range requests {
 		nodeID := c.nodePicker.Pick(req.Key)
 		batches[nodeID] = append(batches[nodeID], req)
 	}
+	return batches
+}
 
-	// send the requests to nodes in parallel
+// distribute the requests to nodes in parallel
+func (c *Client) distributeRequests(ctx context.Context, requests map[string][]*internal.Request) ([]*internal.Response, error) {
 	g, newCtx := errgroup.WithContext(ctx)
-	respChan := make(chan []*internal.Response, len(batches))
-	for nodeID, batch := range batches {
+	respChan := make(chan []*internal.Response, len(requests))
+	for nodeID, batch := range requests {
 		n := nodeID
 		b := batch
 		g.Go(func() error {
@@ -234,6 +292,7 @@ func (c *Client) distributeRequests(ctx context.Context, requests ...*internal.R
 	return finalResponses, nil
 }
 
+// send a batch of requests to a single node
 func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*internal.Request) ([]*internal.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -256,62 +315,6 @@ func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*int
 	}
 	return responses, nil
 }
-
-//func (c *Client) makeRequests(ctx context.Context, requests ...*internal.Request) (*internal.Response, error) {
-//	// ensure that the client is not shutdown
-//	select {
-//	case <-c.shutdownChan:
-//		return nil, ErrClientShutdown
-//	default:
-//	}
-//
-//	// esnure that the context is not cancelled
-//	if err := ctx.Err(); err != nil {
-//		return nil, nil
-//	}
-//
-//	reqBatches := make(map[string][]*internal.Request)
-//	for _, req := range requests {
-//		nodeID := c.nodePicker.Pick(req.Key)
-//		reqBatches[nodeID] = append(reqBatches[nodeID], req)
-//	}
-//
-//	g := errgroup.WithContext(ctx)
-//	for nodeID, batch := range reqBatches {
-//		node, err := c.getNode(ctx, nodeID)
-//		if err != nil {
-//			return nil, err
-//		}
-//		// send the request
-//		respChan := make(chan *internal.Response, len(batch))
-//		g.Go(func() error {
-//			if err := node.Send(ctx, respChan, &internal.Request{OpCode: opCode, Key: key, Value: value, Extras: extras}); err != nil {
-//				close(respChan)
-//				return err
-//			}
-//
-//			for resp := range respChan {
-//
-//			}
-//		})
-//	}
-//
-//	// wait for response
-//	select {
-//	case <-ctx.Done():
-//		return nil, ctx.Err()
-//	case resp, ok := <-respChan:
-//		if !ok {
-//			return nil, ErrNoResult
-//		}
-//
-//		if resp.Err != nil {
-//			return nil, resp.Err
-//		}
-//
-//		return resp, nil
-//	}
-//}
 
 func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, error) {
 	node, ok := c.nodes.Load(nodeID)

@@ -58,33 +58,81 @@ func (n *Node) requestLoop() {
 				return
 			}
 
-			n.processRequestBatch(reqBatch)
+			if len(reqBatch.requests) == 1 {
+				n.processSingleRequest(reqBatch.ctx, reqBatch.responseChan, reqBatch.requests[0])
+			} else {
+				n.processBatchRequest(reqBatch.ctx, reqBatch.responseChan, reqBatch.requests)
+			}
 		}
 	}
 }
 
-func (n *Node) processRequestBatch(reqBatch *requestBatch) {
-	for _, req := range reqBatch.requests {
-		if err := n.conn.WritePacket(reqBatch.ctx, req); err != nil {
-			reqBatch.responseChan <- &Response{Err: err}
-			continue
-		}
-
-		// TODO This is not correct
-		if IsQuietCommand(req.OpCode) {
-			continue
-		}
-
-		resp, err := n.conn.ReadPacket(reqBatch.ctx, req.OpCode, req.Opaque)
-		if err != nil {
-			reqBatch.responseChan <- &Response{Err: err}
-			continue
-		}
-
-		// TODO add publish timeout
-		reqBatch.responseChan <- resp
+func (n *Node) processSingleRequest(ctx context.Context, responseChan chan<- *Response, req *Request) {
+	defer close(responseChan)
+	if err := n.conn.WritePacket(ctx, req); err != nil {
+		responseChan <- &Response{Key: req.Key, Err: err}
+		return
 	}
-	close(reqBatch.responseChan)
+	resp, err := n.conn.ReadPacket(ctx, req.OpCode, req.Opaque)
+	if err != nil {
+		responseChan <- &Response{Key: req.Key, Err: err}
+		return
+	}
+
+	responseChan <- resp
+}
+
+func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Response, requests []*Request) {
+	pendingReq := make(chan *Request, len(requests))
+	sentinel := uint32(len(requests) - 1)
+
+	// spawn a goroutine to gather the responses as they arrive
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for pr := range pendingReq {
+			// make sure the context hasn't expired
+			if err := ctx.Err(); err != nil {
+				responseChan <- &Response{Key: pr.Key, Err: err}
+				return
+			}
+
+			resp, err := n.conn.ReadPacket(ctx, pr.OpCode, pr.Opaque)
+			if err != nil {
+				responseChan <- &Response{Key: pr.Key, Err: err}
+				continue
+			}
+
+			responseChan <- resp
+
+			// if the response is the last in the batch, break out of the loop
+			if resp.Opaque == sentinel {
+				return
+			}
+		}
+	}()
+
+	// pipeline the requests
+	for i, req := range requests {
+		// make sure the context hasn't expired
+		if err := ctx.Err(); err != nil {
+			responseChan <- &Response{Key: req.Key, Err: err}
+			break
+		}
+
+		req.Opaque = uint32(i)
+		if err := n.conn.WritePacket(ctx, req); err != nil {
+			responseChan <- &Response{Key: req.Key, Err: err}
+			continue
+		}
+
+		pendingReq <- req
+	}
+	close(pendingReq)
+	wg.Wait()
+
+	close(responseChan)
 }
 
 func (n *Node) Shutdown() {

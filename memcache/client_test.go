@@ -23,11 +23,14 @@ func TestSetAndGet(t *testing.T) {
 	}
 
 	testCases := make([]testCase, 25)
+	keys := make([][]byte, 25)
 	for i := 0; i < 25; i++ {
 		testCases[i] = testCase{
 			key:   []byte(fmt.Sprintf("key%d", i)),
 			value: []byte(fmt.Sprintf("value%d", i)),
 		}
+
+		keys[i] = testCases[i].key
 	}
 
 	for _, tc := range testCases {
@@ -36,4 +39,8 @@ func TestSetAndGet(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, tc.value, v)
 	}
+
+	vals, err := c.MultiGet(ctx, keys...)
+	assert.NoError(t, err)
+	assert.Equal(t, 25, len(vals))
 }
