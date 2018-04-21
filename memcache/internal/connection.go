@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -40,7 +41,7 @@ type Response struct {
 }
 
 // ParseResponse parses a response from the provided ReadWriter
-func ParseResponse(conn io.ReadWriter, b *Buf) (pkt *Response, err error) {
+func ParseResponse(conn io.Reader, b *Buf) (pkt *Response, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if e, ok := r.(*DecodeErr); ok {
@@ -136,7 +137,7 @@ type Request struct {
 }
 
 // ParseRequest parses a request from the provided ReadWriter
-func ParseRequest(conn io.ReadWriter, b *Buf) (pkt *Request, err error) {
+func ParseRequest(conn io.Reader, b *Buf) (pkt *Request, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if e, ok := r.(*DecodeErr); ok {
@@ -222,16 +223,20 @@ func (pkt *Request) AssembleBytes(b *Buf) {
 
 // ConnWrapper wraps a connection and provides convenient packet read/write functions
 type ConnWrapper struct {
-	reqID   uint32
-	conn    Connection
-	bufPool *BufPool
+	reqID     uint32
+	conn      Connection
+	bufReader *bufio.Reader
+	bufWriter *bufio.Writer
+	bufPool   *BufPool
 }
 
 // for testing purposes
 func NewConnWrapper(conn Connection, bufPool *BufPool) *ConnWrapper {
 	return &ConnWrapper{
-		conn:    conn,
-		bufPool: bufPool,
+		conn:      conn,
+		bufReader: bufio.NewReader(conn),
+		bufWriter: bufio.NewWriter(conn),
+		bufPool:   bufPool,
 	}
 }
 
@@ -255,8 +260,7 @@ func (cw *ConnWrapper) ReadPacket(ctx context.Context, opCode uint8, reqID uint3
 
 	cw.conn.SetReadDeadline(dl)
 	b := NewBuf()
-	// TODO Is it possible to use the bufpool here?
-	pkt, err = ParseResponse(cw.conn, b)
+	pkt, err = ParseResponse(cw.bufReader, b)
 	return
 }
 
@@ -274,10 +278,14 @@ func (cw *ConnWrapper) WritePacket(ctx context.Context, pkt *Request) error {
 	b := cw.bufPool.GetBuf()
 	pkt.AssembleBytes(b)
 
-	_, err := cw.conn.Write(b.Bytes())
+	_, err := cw.bufWriter.Write(b.Bytes())
 	cw.bufPool.PutBuf(b)
 
 	return err
+}
+
+func (cw *ConnWrapper) Flush() error {
+	return cw.bufWriter.Flush()
 }
 
 func (cw *ConnWrapper) Close() error {

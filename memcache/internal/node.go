@@ -73,6 +73,12 @@ func (n *Node) processSingleRequest(ctx context.Context, responseChan chan<- *Re
 		responseChan <- &Response{Key: req.Key, Err: err}
 		return
 	}
+
+	if err := n.conn.Flush(); err != nil {
+		responseChan <- &Response{Key: req.Key, Err: err}
+		return
+	}
+
 	resp, err := n.conn.ReadPacket(ctx, req.OpCode, req.Opaque)
 	if err != nil {
 		responseChan <- &Response{Key: req.Key, Err: err}
@@ -129,9 +135,11 @@ func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Res
 
 		pendingReq <- req
 	}
-	close(pendingReq)
-	wg.Wait()
 
+	close(pendingReq)
+	//TODO handle flush error
+	n.conn.Flush()
+	wg.Wait()
 	close(responseChan)
 }
 
