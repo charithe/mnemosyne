@@ -59,7 +59,7 @@ func TestReadPacket(t *testing.T) {
 	t.Run("error response", func(t *testing.T) {
 		// error response
 		ctx, deadline := mkContext()
-		pkt, err := cw.ReadPacket(ctx, OpGet, 0)
+		pkt, err := cw.ReadPacket(ctx)
 		assert.NoError(t, err)
 		assert.Equal(t, deadline, mock.readDeadline)
 		assert.Equal(t, StatusKeyNotFound, pkt.StatusCode)
@@ -73,7 +73,7 @@ func TestReadPacket(t *testing.T) {
 	t.Run("get response", func(t *testing.T) {
 		// GET response
 		ctx, deadline := mkContext()
-		pkt, err := cw.ReadPacket(ctx, OpGet, 0)
+		pkt, err := cw.ReadPacket(ctx)
 		assert.NoError(t, err)
 		assert.Equal(t, deadline, mock.readDeadline)
 		assert.Equal(t, StatusNoError, pkt.StatusCode)
@@ -87,7 +87,7 @@ func TestReadPacket(t *testing.T) {
 	t.Run("getk response", func(t *testing.T) {
 		// GETK response
 		ctx, deadline := mkContext()
-		pkt, err := cw.ReadPacket(ctx, OpGet, 0)
+		pkt, err := cw.ReadPacket(ctx)
 		assert.NoError(t, err)
 		assert.Equal(t, deadline, mock.readDeadline)
 		assert.Equal(t, StatusNoError, pkt.StatusCode)
@@ -101,7 +101,7 @@ func TestReadPacket(t *testing.T) {
 	t.Run("set response", func(t *testing.T) {
 		// SET response
 		ctx, deadline := mkContext()
-		pkt, err := cw.ReadPacket(ctx, OpAdd, 0)
+		pkt, err := cw.ReadPacket(ctx)
 		assert.NoError(t, err)
 		assert.Equal(t, deadline, mock.readDeadline)
 		assert.Equal(t, StatusNoError, pkt.StatusCode)

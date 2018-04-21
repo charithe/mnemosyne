@@ -50,7 +50,7 @@ func ParseResponse(conn io.Reader, b *Buf) (pkt *Response, err error) {
 		}
 	}()
 
-	if _, err := io.CopyN(b, conn, headerSize); err != nil {
+	if _, err = io.CopyN(b, conn, headerSize); err != nil {
 		return nil, err
 	}
 
@@ -69,7 +69,7 @@ func ParseResponse(conn io.Reader, b *Buf) (pkt *Response, err error) {
 	valueLen := bodyLen - (keyLen + extrasLen)
 
 	if bodyLen > 0 {
-		if _, err := io.CopyN(b, conn, int64(bodyLen)); err != nil {
+		if _, err = io.CopyN(b, conn, int64(bodyLen)); err != nil {
 			return nil, err
 		}
 	}
@@ -93,7 +93,7 @@ func ParseResponse(conn io.Reader, b *Buf) (pkt *Response, err error) {
 		pkt.Value = b.ReadBytes(valueLen)
 	}
 
-	return pkt, nil
+	return
 }
 
 // AssembleBytes assembles the byte representation of the response over the wire
@@ -146,7 +146,7 @@ func ParseRequest(conn io.Reader, b *Buf) (pkt *Request, err error) {
 		}
 	}()
 
-	if _, err := io.CopyN(b, conn, headerSize); err != nil {
+	if _, err = io.CopyN(b, conn, headerSize); err != nil {
 		return nil, err
 	}
 
@@ -165,7 +165,7 @@ func ParseRequest(conn io.Reader, b *Buf) (pkt *Request, err error) {
 	valueLen := bodyLen - (keyLen + extrasLen)
 
 	if bodyLen > 0 {
-		if _, err := io.CopyN(b, conn, int64(bodyLen)); err != nil {
+		if _, err = io.CopyN(b, conn, int64(bodyLen)); err != nil {
 			return nil, err
 		}
 	}
@@ -189,7 +189,7 @@ func ParseRequest(conn io.Reader, b *Buf) (pkt *Request, err error) {
 		pkt.Value = b.ReadBytes(valueLen)
 	}
 
-	return pkt, nil
+	return
 }
 
 // AssembleBytes generates the byte representation of the request to send over the wire
@@ -240,7 +240,7 @@ func NewConnWrapper(conn Connection, bufPool *BufPool) *ConnWrapper {
 	}
 }
 
-func (cw *ConnWrapper) ReadPacket(ctx context.Context, opCode uint8, reqID uint32) (pkt *Response, err error) {
+func (cw *ConnWrapper) ReadPacket(ctx context.Context) (pkt *Response, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if e, ok := r.(*DecodeErr); ok {

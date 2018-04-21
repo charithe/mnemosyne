@@ -79,7 +79,7 @@ func (n *Node) processSingleRequest(ctx context.Context, responseChan chan<- *Re
 		return
 	}
 
-	resp, err := n.conn.ReadPacket(ctx, req.OpCode, req.Opaque)
+	resp, err := n.conn.ReadPacket(ctx)
 	if err != nil {
 		responseChan <- &Response{Key: req.Key, Err: err}
 		return
@@ -104,7 +104,7 @@ func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Res
 				return
 			}
 
-			resp, err := n.conn.ReadPacket(ctx, pr.OpCode, pr.Opaque)
+			resp, err := n.conn.ReadPacket(ctx)
 			if err != nil {
 				responseChan <- &Response{Key: pr.Key, Err: err}
 				continue

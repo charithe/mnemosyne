@@ -32,8 +32,8 @@ func TestClient(t *testing.T) {
 				},
 			},
 			clientSession: func(t *testing.T, c *Client) {
-				r, err := c.Get(context.Background(), []byte("key"))
-				assert.NoError(t, err)
+				r := c.Get(context.Background(), []byte("key"))
+				assert.NoError(t, r.Err())
 				assert.Equal(t, []byte("value"), r.Value())
 			},
 		},
@@ -50,29 +50,28 @@ func TestClient(t *testing.T) {
 				ctx, cancelFunc := context.WithTimeout(context.Background(), 15*time.Millisecond)
 				defer cancelFunc()
 
-				r, err := c.Get(ctx, []byte("key"))
-				assert.NoError(t, err)
+				r := c.Get(ctx, []byte("key"))
+				assert.NoError(t, r.Err())
 				assert.Equal(t, []byte("value"), r.Value())
 			},
 		},
-		//{
-		//	name: "Delay exceeding timeout",
-		//	serverSession: []*internal.Scenario{
-		//		&internal.Scenario{
-		//			Expect:  &internal.Request{OpCode: internal.OpGetK, Key: []byte("key")},
-		//			Respond: &internal.Response{OpCode: internal.OpGetK, Key: []byte("key"), Value: []byte("value")},
-		//			Delay:   20 * time.Millisecond,
-		//		},
-		//	},
-		//	clientSession: func(t *testing.T, c *Client) {
-		//		ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Millisecond)
-		//		defer cancelFunc()
+		{
+			name: "Delay exceeding timeout",
+			serverSession: []*internal.Scenario{
+				&internal.Scenario{
+					Expect:  &internal.Request{OpCode: internal.OpGetK, Key: []byte("key")},
+					Respond: &internal.Response{OpCode: internal.OpGetK, Key: []byte("key"), Value: []byte("value")},
+					Delay:   10 * time.Millisecond,
+				},
+			},
+			clientSession: func(t *testing.T, c *Client) {
+				ctx, cancelFunc := context.WithTimeout(context.Background(), 5*time.Millisecond)
+				defer cancelFunc()
 
-		//		_, err := c.Get(ctx, []byte("key"))
-		//		assert.Error(t, err)
-		//		assert.Equal(t, context.DeadlineExceeded, err)
-		//	},
-		//},
+				r := c.Get(ctx, []byte("key"))
+				assert.Error(t, r.Err())
+			},
+		},
 	}
 
 	for _, tc := range testCases {

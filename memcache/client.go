@@ -54,28 +54,45 @@ var statusCodeToErr = map[uint16]error{
 }
 
 // Result represents a result from a single operation
-type Result struct {
-	response *internal.Response
+type Result interface {
+	Err() error
+	Key() []byte
+	Value() []byte
+	CAS() uint64
 }
 
-func (r *Result) Key() []byte {
-	return r.response.Key
+// result implements the Result interface
+type result struct {
+	resp *internal.Response
 }
 
-func (r *Result) Value() []byte {
-	return r.response.Value
+func (r *result) Key() []byte {
+	return r.resp.Key
 }
 
-func (r *Result) CAS() uint64 {
-	return r.response.CAS
+func (r *result) Value() []byte {
+	return r.resp.Value
 }
 
-func (r *Result) Err() error {
-	if r.response.Err != nil {
-		return r.response.Err
+func (r *result) CAS() uint64 {
+	return r.resp.CAS
+}
+
+func (r *result) Err() error {
+	if r.resp.Err != nil {
+		return r.resp.Err
 	}
 
-	return statusCodeToErr[r.response.StatusCode]
+	return statusCodeToErr[r.resp.StatusCode]
+}
+
+// Helper functions for creating Result objects
+func newResult(resp *internal.Response) Result {
+	return &result{resp: resp}
+}
+
+func newErrResult(err error) Result {
+	return &result{resp: &internal.Response{Err: err}}
 }
 
 // MutationOpt is an optional modification to apply to the request
@@ -158,22 +175,22 @@ func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 }
 
 // Set inserts or overwrites the value pointed to by the key
-func (c *Client) Set(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (*Result, error) {
+func (c *Client) Set(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
 	return c.doMutation(ctx, internal.OpSet, key, value, mutationOpts...)
 }
 
 // Add inserts the value iff the key doesn't already exist
-func (c *Client) Add(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (*Result, error) {
+func (c *Client) Add(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
 	return c.doMutation(ctx, internal.OpAdd, key, value, mutationOpts...)
 }
 
 // Replace overwrites the value iff the key already exists
-func (c *Client) Replace(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (*Result, error) {
+func (c *Client) Replace(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
 	return c.doMutation(ctx, internal.OpReplace, key, value, mutationOpts...)
 }
 
 // helper for mutations (SET, ADD, REPLACE)
-func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) (*Result, error) {
+func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) Result {
 	req := &internal.Request{OpCode: opCode, Key: key, Value: value}
 	for _, mo := range mutationOpts {
 		mo(req)
@@ -185,35 +202,32 @@ func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte
 	}
 
 	resp, err := c.makeRequests(ctx, req)
-	if err != nil || resp == nil {
-		return nil, err
+	if err != nil {
+		return newErrResult(err)
 	}
-	return &Result{response: resp[0]}, nil
+	return newResult(resp[0])
 }
 
 // Get performs a GET for the given key
-func (c *Client) Get(ctx context.Context, key []byte) (*Result, error) {
+func (c *Client) Get(ctx context.Context, key []byte) Result {
 	req := &internal.Request{
 		OpCode: internal.OpGetK,
 		Key:    key,
 	}
 
 	resp, err := c.makeRequests(ctx, req)
-	if err != nil || resp == nil {
-		return nil, err
+	if err != nil {
+		return newErrResult(err)
 	}
-	return &Result{response: resp[0]}, nil
+	return newResult(resp[0])
 }
 
 // MultiGet performs a lookup for a set of keys and returns the found values
-func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]*Result, error) {
+func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) []Result {
 	// we can short-circuit a lot of code if there's only one key to lookup
 	if len(keys) == 1 {
-		result, err := c.Get(ctx, keys[0])
-		if err != nil {
-			return nil, err
-		}
-		return []*Result{result}, nil
+		res := c.Get(ctx, keys[0])
+		return []Result{res}
 	}
 
 	groups := make(map[string][]*internal.Request)
@@ -232,15 +246,15 @@ func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]*Result, error
 
 	responses, err := c.distributeRequests(ctx, groups)
 	if err != nil {
-		return nil, err
+		return []Result{newErrResult(err)}
 	}
 
-	results := make([]*Result, len(responses))
+	results := make([]Result, len(responses))
 	for i, r := range responses {
-		results[i] = &Result{response: r}
+		results[i] = newResult(r)
 	}
 
-	return results, nil
+	return results
 }
 
 // Close closes all connections to the remote nodes and cancels any pending requests
