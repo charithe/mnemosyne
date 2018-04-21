@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bytes"
+	"net"
 	"time"
 )
 
@@ -23,6 +24,22 @@ func (mc *mockConn) SetReadDeadline(t time.Time) error {
 func (mc *mockConn) SetWriteDeadline(t time.Time) error {
 	mc.writeDeadline = t
 	return nil
+}
+
+func (mc *mockConn) SetDeadline(t time.Time) error {
+	mc.readDeadline = t
+	mc.writeDeadline = t
+	return nil
+}
+
+func (mc *mockConn) LocalAddr() net.Addr {
+	ip := net.ParseIP("127.0.0.1")
+	return &net.IPAddr{IP: ip, Zone: ""}
+}
+
+func (mc *mockConn) RemoteAddr() net.Addr {
+	ip := net.ParseIP("127.0.0.1")
+	return &net.IPAddr{IP: ip, Zone: ""}
 }
 
 func (mc *mockConn) setPayload(p []byte) error {
