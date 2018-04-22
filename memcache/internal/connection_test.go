@@ -188,7 +188,7 @@ func TestWritePacket(t *testing.T) {
 			mock.Reset()
 			ctx, deadline := mkContext()
 			assert.NoError(t, cw.WritePacket(ctx, tc.pkt))
-			assert.NoError(t, cw.Flush())
+			assert.NoError(t, cw.FlushWriteBuffer())
 			assert.Equal(t, deadline, mock.writeDeadline)
 
 			actualBytes := mock.getPayload()

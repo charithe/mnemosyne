@@ -10,8 +10,9 @@ import (
 
 const (
 	headerSize           = 24
-	defaultReadDeadline  = 100 * time.Millisecond
-	defaultWriteDeadline = 100 * time.Millisecond
+	defaultReadDeadline  = 200 * time.Millisecond
+	defaultWriteDeadline = 200 * time.Millisecond
+	tempBufferSize       = 256
 )
 
 var (
@@ -223,20 +224,22 @@ func (pkt *Request) AssembleBytes(b *Buf) {
 
 // ConnWrapper wraps a connection and provides convenient packet read/write functions
 type ConnWrapper struct {
-	reqID     uint32
-	conn      Connection
-	bufReader *bufio.Reader
-	bufWriter *bufio.Writer
-	bufPool   *BufPool
+	reqID      uint32
+	conn       Connection
+	bufReader  *bufio.Reader
+	bufWriter  *bufio.Writer
+	bufPool    *BufPool
+	tempBuffer []byte
 }
 
 // for testing purposes
 func NewConnWrapper(conn Connection, bufPool *BufPool) *ConnWrapper {
 	return &ConnWrapper{
-		conn:      conn,
-		bufReader: bufio.NewReader(conn),
-		bufWriter: bufio.NewWriter(conn),
-		bufPool:   bufPool,
+		conn:       conn,
+		bufReader:  bufio.NewReader(conn),
+		bufWriter:  bufio.NewWriter(conn),
+		bufPool:    bufPool,
+		tempBuffer: make([]byte, tempBufferSize),
 	}
 }
 
@@ -269,23 +272,29 @@ func (cw *ConnWrapper) WritePacket(ctx context.Context, pkt *Request) error {
 		return err
 	}
 
+	b := cw.bufPool.GetBuf()
+	pkt.AssembleBytes(b)
+
 	dl, ok := ctx.Deadline()
 	if !ok {
 		dl = time.Now().Add(defaultWriteDeadline)
 	}
 
 	cw.conn.SetWriteDeadline(dl)
-	b := cw.bufPool.GetBuf()
-	pkt.AssembleBytes(b)
-
 	_, err := cw.bufWriter.Write(b.Bytes())
 	cw.bufPool.PutBuf(b)
 
 	return err
 }
 
-func (cw *ConnWrapper) Flush() error {
+func (cw *ConnWrapper) FlushWriteBuffer() error {
 	return cw.bufWriter.Flush()
+}
+
+func (cw *ConnWrapper) FlushReadBuffer() {
+	cw.conn.SetReadDeadline(time.Now())
+	cw.bufReader.Read(cw.tempBuffer)
+	cw.bufReader.Reset(cw.conn)
 }
 
 func (cw *ConnWrapper) Close() error {

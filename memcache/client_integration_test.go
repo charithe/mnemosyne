@@ -50,12 +50,10 @@ func TestSetGetAndMultiGet(t *testing.T) {
 		t.Run(fmt.Sprintf("%s", tc.key), func(t *testing.T) {
 			ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancelFunc()
-			r, err := c.Set(ctx, tc.key, tc.value, WithExpiry(1*time.Hour))
-			assert.NoError(t, err)
+			r := c.Set(ctx, tc.key, tc.value, WithExpiry(1*time.Hour))
 			assert.NoError(t, r.Err())
 
-			r, err = c.Get(ctx, tc.key)
-			assert.NoError(t, err)
+			r = c.Get(ctx, tc.key)
 			assert.NoError(t, r.Err())
 			assert.Equal(t, tc.key, r.Key())
 			assert.Equal(t, tc.value, r.Value())
@@ -65,10 +63,31 @@ func TestSetGetAndMultiGet(t *testing.T) {
 	t.Run("MultiGet", func(t *testing.T) {
 		ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelFunc()
-		results, err := c.MultiGet(ctx, keys...)
-		assert.NoError(t, err)
+		results := c.MultiGet(ctx, keys...)
 		assert.Equal(t, numKV, len(results))
 	})
+}
+
+func TestDelete(t *testing.T) {
+	key := []byte("keydel")
+	value := []byte("valdel")
+
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	r := c.Set(ctx, key, value, WithExpiry(1*time.Hour))
+	assert.NoError(t, r.Err())
+
+	r = c.Get(ctx, key)
+	assert.NoError(t, r.Err())
+	assert.Equal(t, key, r.Key())
+	assert.Equal(t, value, r.Value())
+
+	r = c.Delete(ctx, key)
+	assert.NoError(t, r.Err())
+
+	r = c.Get(ctx, key)
+	assert.Error(t, r.Err())
 }
 
 func TestCAS(t *testing.T) {
@@ -77,31 +96,29 @@ func TestCAS(t *testing.T) {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelFunc()
 
-	r, err := c.Add(ctx, key, []byte("valueXXX"))
-	assert.NoError(t, err)
+	r := c.Add(ctx, key, []byte("valueXXX"))
 	assert.NoError(t, r.Err())
 
 	cas := r.CAS()
 
 	// Should succeed because the CAS value matches
-	r, err = c.Set(ctx, key, []byte("valueXXY"), WithCASValue(cas))
-	assert.NoError(t, err)
+	r = c.Set(ctx, key, []byte("valueXXY"), WithCASValue(cas))
 	assert.NoError(t, r.Err())
 
 	// Should fail because the key already exists
-	r, err = c.Add(ctx, key, []byte("valueXXX"), WithCASValue(cas))
-	assert.NoError(t, err)
+	r = c.Add(ctx, key, []byte("valueXXX"), WithCASValue(cas))
 	assert.Error(t, r.Err())
 	assert.Equal(t, ErrKeyExists, r.Err())
 
 	// Should fail because the CAS value doesn't match
-	r, err = c.Set(ctx, key, []byte("valueYYY"), WithCASValue(cas+uint64(1000)))
-	assert.NoError(t, err)
+	r = c.Set(ctx, key, []byte("valueYYY"), WithCASValue(cas+uint64(1000)))
 	assert.Error(t, r.Err())
 	assert.Equal(t, ErrKeyExists, r.Err())
 
-	r, err = c.Get(ctx, key)
-	assert.NoError(t, err)
+	r = c.Get(ctx, key)
 	assert.NoError(t, r.Err())
 	assert.Equal(t, []byte("valueXXY"), r.Value())
+
+	//clean up
+	c.Delete(ctx, key)
 }

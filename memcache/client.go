@@ -3,6 +3,7 @@ package memcache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -55,6 +56,7 @@ var statusCodeToErr = map[uint16]error{
 
 // Result represents a result from a single operation
 type Result interface {
+	fmt.Stringer
 	Err() error
 	Key() []byte
 	Value() []byte
@@ -84,6 +86,10 @@ func (r *result) Err() error {
 	}
 
 	return statusCodeToErr[r.resp.StatusCode]
+}
+
+func (r *result) String() string {
+	return fmt.Sprintf("%+v", r.resp)
 }
 
 // Helper functions for creating Result objects
@@ -201,11 +207,19 @@ func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte
 		WithExpiry(0 * time.Hour)(req)
 	}
 
-	resp, err := c.makeRequests(ctx, req)
-	if err != nil {
-		return newErrResult(err)
+	res := c.makeRequests(ctx, req)
+	return res[0]
+}
+
+// Delete performs a DELETE for the given key
+func (c *Client) Delete(ctx context.Context, key []byte) Result {
+	req := &internal.Request{
+		OpCode: internal.OpDelete,
+		Key:    key,
 	}
-	return newResult(resp[0])
+
+	res := c.makeRequests(ctx, req)
+	return res[0]
 }
 
 // Get performs a GET for the given key
@@ -215,11 +229,8 @@ func (c *Client) Get(ctx context.Context, key []byte) Result {
 		Key:    key,
 	}
 
-	resp, err := c.makeRequests(ctx, req)
-	if err != nil {
-		return newErrResult(err)
-	}
-	return newResult(resp[0])
+	res := c.makeRequests(ctx, req)
+	return res[0]
 }
 
 // MultiGet performs a lookup for a set of keys and returns the found values
@@ -278,27 +289,42 @@ func (c *Client) Close() error {
 }
 
 // decide on how the requests should be made
-func (c *Client) makeRequests(ctx context.Context, requests ...*internal.Request) ([]*internal.Response, error) {
+func (c *Client) makeRequests(ctx context.Context, requests ...*internal.Request) []Result {
 	// ensure that the client is not shutdown
 	select {
 	case <-c.shutdownChan:
-		return nil, ErrClientShutdown
+		return []Result{newErrResult(ErrClientShutdown)}
 	default:
 	}
 
 	// ensure that the context hasn't expired
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return []Result{newErrResult(err)}
 	}
 
 	// don't bother with goroutines if there's only a single request
 	if len(requests) == 1 {
 		nodeID := c.nodePicker.Pick(requests[0].Key)
-		return c.sendToNode(ctx, nodeID, requests[0])
+		resp, err := c.sendToNode(ctx, nodeID, requests[0])
+		if err != nil {
+			return []Result{newErrResult(err)}
+		}
+		return []Result{newResult(resp[0])}
 	}
 
+	// group the requests by node
 	groups := c.groupRequests(requests...)
-	return c.distributeRequests(ctx, groups)
+	responses, err := c.distributeRequests(ctx, groups)
+	if err != nil {
+		return []Result{newErrResult(err)}
+	}
+
+	results := make([]Result, len(responses))
+	for i, r := range responses {
+		results[i] = newResult(r)
+	}
+
+	return results
 }
 
 // group requests by destination node

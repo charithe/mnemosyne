@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"log"
 	"net"
@@ -9,8 +10,6 @@ import (
 
 	"github.com/akutz/memconn"
 )
-
-const connName = "memcachemock"
 
 // Scenario defines the optional delay and response to send back when the request matches the expected request
 type Scenario struct {
@@ -29,7 +28,7 @@ type MockServer struct {
 	sessions chan *session
 }
 
-func NewMockServer() (*MockServer, error) {
+func NewMockServer(connName string) (*MockServer, error) {
 	listener, err := memconn.Listen("memu", connName)
 	if err != nil {
 		return nil, err
@@ -54,6 +53,7 @@ func (ms *MockServer) serve() {
 	defer conn.Close()
 	for sess := range ms.sessions {
 		for _, scn := range sess.scenarios {
+			conn.SetReadDeadline(time.Now().Add(defaultReadDeadline))
 			b := NewBuf()
 			req, err := ParseRequest(conn, b)
 			if err != nil {
@@ -78,6 +78,7 @@ func (ms *MockServer) serve() {
 
 			b.Reset()
 			resp.AssembleBytes(b)
+			conn.SetWriteDeadline(time.Now().Add(defaultWriteDeadline))
 			_, err = conn.Write(b.Bytes())
 			if err != nil {
 				log.Printf("Failed to write response: %#v", err)
@@ -110,5 +111,15 @@ type MockConnector struct {
 }
 
 func (mc *MockConnector) Connect(ctx context.Context, nodeID string) (net.Conn, error) {
-	return memconn.DialContext(ctx, "memu", connName)
+	return memconn.DialContext(ctx, "memu", nodeID)
+}
+
+// MockNodePicker implements the NodePicker interface
+// It assumes that the key starts with nodeID followed by an underscore
+type MockNodePicker struct {
+}
+
+func (mnp *MockNodePicker) Pick(key []byte) string {
+	p := bytes.Split(key, []byte("_"))
+	return string(p[0])
 }

@@ -58,6 +58,9 @@ func (n *Node) requestLoop() {
 				return
 			}
 
+			// Remove all unprocessed responses from the connection
+			n.conn.FlushReadBuffer()
+			// send the new request(s)
 			if len(reqBatch.requests) == 1 {
 				n.processSingleRequest(reqBatch.ctx, reqBatch.responseChan, reqBatch.requests[0])
 			} else {
@@ -74,7 +77,7 @@ func (n *Node) processSingleRequest(ctx context.Context, responseChan chan<- *Re
 		return
 	}
 
-	if err := n.conn.Flush(); err != nil {
+	if err := n.conn.FlushWriteBuffer(); err != nil {
 		responseChan <- &Response{Key: req.Key, Err: err}
 		return
 	}
@@ -138,7 +141,7 @@ func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Res
 
 	close(pendingReq)
 	//TODO handle flush error
-	n.conn.Flush()
+	n.conn.FlushWriteBuffer()
 	wg.Wait()
 	close(responseChan)
 }
