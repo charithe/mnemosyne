@@ -90,6 +90,34 @@ func TestDelete(t *testing.T) {
 	assert.Error(t, r.Err())
 }
 
+func TestMultiDelete(t *testing.T) {
+	numKeys := 25
+	keys := make([][]byte, numKeys)
+
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	for i := 0; i < numKeys; i++ {
+		keys[i] = []byte(fmt.Sprintf("delkey%d", i))
+		r := c.Set(ctx, keys[i], []byte(fmt.Sprintf("value%d", i)))
+		assert.NoError(t, r.Err())
+	}
+
+	rr := c.MultiGet(ctx, keys...)
+	assert.Len(t, rr, numKeys)
+	for _, r := range rr {
+		assert.NoError(t, r.Err())
+	}
+
+	rr = c.MultiDelete(ctx, keys...)
+	assert.Len(t, rr, 1)
+	assert.NoError(t, rr[0].Err())
+
+	rr = c.MultiGet(ctx, keys...)
+	assert.Len(t, rr, 1)
+	assert.Error(t, rr[0].Err())
+}
+
 func TestCAS(t *testing.T) {
 	key := []byte(fmt.Sprintf("keyXXX%d", rand.Int()))
 

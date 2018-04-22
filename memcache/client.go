@@ -207,19 +207,7 @@ func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte
 		WithExpiry(0 * time.Hour)(req)
 	}
 
-	res := c.makeRequests(ctx, req)
-	return res[0]
-}
-
-// Delete performs a DELETE for the given key
-func (c *Client) Delete(ctx context.Context, key []byte) Result {
-	req := &internal.Request{
-		OpCode: internal.OpDelete,
-		Key:    key,
-	}
-
-	res := c.makeRequests(ctx, req)
-	return res[0]
+	return c.makeRequest(ctx, req)
 }
 
 // Get performs a GET for the given key
@@ -229,8 +217,7 @@ func (c *Client) Get(ctx context.Context, key []byte) Result {
 		Key:    key,
 	}
 
-	res := c.makeRequests(ctx, req)
-	return res[0]
+	return c.makeRequest(ctx, req)
 }
 
 // MultiGet performs a lookup for a set of keys and returns the found values
@@ -241,31 +228,30 @@ func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) []Result {
 		return []Result{res}
 	}
 
-	groups := make(map[string][]*internal.Request)
-	for _, k := range keys {
-		nodeID := c.nodePicker.Pick(k)
+	groups := c.groupRequests(internal.OpGetKQ, internal.OpGetK, keys)
+	return c.distributeRequests(ctx, groups)
+}
 
-		// If there is more than one request to the node, we can make the previous GET a quiet one to save on network roundtrips
-		grp := groups[nodeID]
-		grpSize := len(grp)
-		if grpSize > 0 {
-			grp[grpSize-1].OpCode = internal.OpGetKQ
-		}
-
-		groups[nodeID] = append(grp, &internal.Request{OpCode: internal.OpGetK, Key: k})
+// Delete performs a DELETE for the given key
+func (c *Client) Delete(ctx context.Context, key []byte) Result {
+	req := &internal.Request{
+		OpCode: internal.OpDelete,
+		Key:    key,
 	}
 
-	responses, err := c.distributeRequests(ctx, groups)
-	if err != nil {
-		return []Result{newErrResult(err)}
+	return c.makeRequest(ctx, req)
+}
+
+// MultiDelete performs a batch delete of the keys
+func (c *Client) MultiDelete(ctx context.Context, keys ...[]byte) []Result {
+	// we can short-circuit a lot of code if there's only one key to delete
+	if len(keys) == 1 {
+		res := c.Delete(ctx, keys[0])
+		return []Result{res}
 	}
 
-	results := make([]Result, len(responses))
-	for i, r := range responses {
-		results[i] = newResult(r)
-	}
-
-	return results
+	groups := c.groupRequests(internal.OpDeleteQ, internal.OpDelete, keys)
+	return c.distributeRequests(ctx, groups)
 }
 
 // Close closes all connections to the remote nodes and cancels any pending requests
@@ -288,108 +274,92 @@ func (c *Client) Close() error {
 	}
 }
 
-// decide on how the requests should be made
-func (c *Client) makeRequests(ctx context.Context, requests ...*internal.Request) []Result {
+func (c *Client) makeRequest(ctx context.Context, request *internal.Request) Result {
 	// ensure that the client is not shutdown
 	select {
 	case <-c.shutdownChan:
-		return []Result{newErrResult(ErrClientShutdown)}
+		return newErrResult(ErrClientShutdown)
 	default:
 	}
 
 	// ensure that the context hasn't expired
 	if err := ctx.Err(); err != nil {
-		return []Result{newErrResult(err)}
+		return newErrResult(err)
 	}
 
-	// don't bother with goroutines if there's only a single request
-	if len(requests) == 1 {
-		nodeID := c.nodePicker.Pick(requests[0].Key)
-		resp, err := c.sendToNode(ctx, nodeID, requests[0])
-		if err != nil {
-			return []Result{newErrResult(err)}
-		}
-		return []Result{newResult(resp[0])}
-	}
-
-	// group the requests by node
-	groups := c.groupRequests(requests...)
-	responses, err := c.distributeRequests(ctx, groups)
-	if err != nil {
-		return []Result{newErrResult(err)}
-	}
-
-	results := make([]Result, len(responses))
-	for i, r := range responses {
-		results[i] = newResult(r)
-	}
-
-	return results
+	nodeID := c.nodePicker.Pick(request.Key)
+	results := c.sendToNode(ctx, nodeID, request)
+	return results[0]
 }
 
-// group requests by destination node
-func (c *Client) groupRequests(requests ...*internal.Request) map[string][]*internal.Request {
-	batches := make(map[string][]*internal.Request)
-	for _, req := range requests {
-		nodeID := c.nodePicker.Pick(req.Key)
-		batches[nodeID] = append(batches[nodeID], req)
+// groups the keys by node and constructs the batch of requests to send
+func (c *Client) groupRequests(quietOpCode, normalOpCode uint8, keys [][]byte) map[string][]*internal.Request {
+	groups := make(map[string][]*internal.Request)
+	for _, k := range keys {
+		nodeID := c.nodePicker.Pick(k)
+
+		// If there is more than one request to the node, we can make the previous command  a quiet one to save on network roundtrips
+		grp := groups[nodeID]
+		grpSize := len(grp)
+		if grpSize > 0 {
+			grp[grpSize-1].OpCode = quietOpCode
+		}
+
+		groups[nodeID] = append(grp, &internal.Request{OpCode: normalOpCode, Key: k})
 	}
-	return batches
+
+	return groups
 }
 
 // distribute the requests to nodes in parallel
-func (c *Client) distributeRequests(ctx context.Context, requests map[string][]*internal.Request) ([]*internal.Response, error) {
+func (c *Client) distributeRequests(ctx context.Context, requests map[string][]*internal.Request) []Result {
 	g, newCtx := errgroup.WithContext(ctx)
-	respChan := make(chan []*internal.Response, len(requests))
+	resultChan := make(chan []Result, len(requests))
 	for nodeID, batch := range requests {
 		n := nodeID
 		b := batch
 		g.Go(func() error {
-			r, err := c.sendToNode(newCtx, n, b...)
-			if err != nil {
-				return err
-			}
-			respChan <- r
+			resultChan <- c.sendToNode(newCtx, n, b...)
 			return nil
 		})
 	}
 
 	err := g.Wait()
-	close(respChan)
+	close(resultChan)
+
 	if err != nil {
-		return nil, err
+		return []Result{newErrResult(err)}
 	}
 
-	// join up all the responses
-	var finalResponses []*internal.Response
-	for resp := range respChan {
-		finalResponses = append(finalResponses, resp...)
+	var results []Result
+	for res := range resultChan {
+		results = append(results, res...)
 	}
-	return finalResponses, nil
+	return results
 }
 
 // send a batch of requests to a single node
-func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*internal.Request) ([]*internal.Response, error) {
+func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*internal.Request) []Result {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return []Result{newErrResult(err)}
 	}
 
 	node, err := c.getNode(ctx, nodeID)
 	if err != nil {
-		return nil, err
+		return []Result{newErrResult(err)}
 	}
 
 	respChan := make(chan *internal.Response, len(requests))
 	if err := node.Send(ctx, respChan, requests...); err != nil {
 		close(respChan)
-		return nil, err
+		return []Result{newErrResult(err)}
 	}
 
-	var responses []*internal.Response
+	var results []Result
 	for resp := range respChan {
-		responses = append(responses, resp)
+		results = append(results, newResult(resp))
 	}
-	return responses, nil
+	return results
 }
 
 func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, error) {
