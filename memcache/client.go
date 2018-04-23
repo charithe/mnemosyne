@@ -108,8 +108,23 @@ type MutationOpt func(req *internal.Request)
 func WithExpiry(expiry time.Duration) MutationOpt {
 	return func(req *internal.Request) {
 		extras := internal.NewBuf()
-		extras.WriteUint32(0)
-		extras.WriteUint32(uint32(expiry.Seconds()))
+		switch req.OpCode {
+		case internal.OpIncrement:
+			fallthrough
+		case internal.OpDecrement:
+			fallthrough
+		case internal.OpIncrementQ:
+			fallthrough
+		case internal.OpDecrementQ:
+			fallthrough
+		case internal.OpFlush:
+			fallthrough
+		case internal.OpFlushQ:
+			extras.WriteUint32(uint32(expiry.Seconds()))
+		default:
+			extras.WriteUint32(0)
+			extras.WriteUint32(uint32(expiry.Seconds()))
+		}
 		req.Extras = extras.Bytes()
 	}
 }
@@ -252,6 +267,70 @@ func (c *Client) MultiDelete(ctx context.Context, keys ...[]byte) []Result {
 
 	groups := c.groupRequests(internal.OpDeleteQ, internal.OpDelete, keys)
 	return c.distributeRequests(ctx, groups)
+}
+
+// Increment performs an INCR operation
+// If the key already exists, the value will be incremented by delta. If the key does not exist, it will be set to initial.
+func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) Result {
+	return c.doNumericOp(ctx, internal.OpIncrement, key, initial, delta, mutationOpts...)
+}
+
+// Decrement performs a DECR operation
+// If the key already exists, the value will be decremented by delta. If the key does not exist, it will be set to initial.
+func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) Result {
+	return c.doNumericOp(ctx, internal.OpDecrement, key, initial, delta, mutationOpts...)
+}
+
+func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) Result {
+	req := &internal.Request{
+		OpCode: opCode,
+		Key:    key,
+	}
+
+	for _, mo := range mutationOpts {
+		mo(req)
+	}
+
+	extras := internal.NewBuf()
+	extras.WriteUint64(delta)
+	extras.WriteUint64(initial)
+	if req.Extras != nil {
+		// normally, extras would contain flags (4 bytes) followed by the expiry (4 bytes)
+		extras.Write(req.Extras)
+	} else {
+		extras.WriteUint32(0)
+	}
+	req.Extras = extras.Bytes()
+
+	return c.makeRequest(ctx, req)
+}
+
+// Flush flushes all the keys
+func (c *Client) Flush(ctx context.Context, nodeIDs []string, mutationOpts ...MutationOpt) Result {
+	req := &internal.Request{
+		OpCode: internal.OpFlush,
+	}
+
+	for _, mo := range mutationOpts {
+		mo(req)
+	}
+
+	if len(nodeIDs) == 1 {
+		r := c.sendToNode(ctx, nodeIDs[0], req)
+		return r[0]
+	}
+
+	g, newCtx := errgroup.WithContext(ctx)
+	for _, n := range nodeIDs {
+		nid := n
+		g.Go(func() error {
+			r := c.sendToNode(newCtx, nid, req)
+			return r[0].Err()
+		})
+	}
+
+	err := g.Wait()
+	return newErrResult(err)
 }
 
 // Close closes all connections to the remote nodes and cancels any pending requests

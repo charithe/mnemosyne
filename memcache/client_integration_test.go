@@ -4,6 +4,7 @@ package memcache
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"testing"
@@ -149,4 +150,53 @@ func TestCAS(t *testing.T) {
 
 	//clean up
 	c.Delete(ctx, key)
+}
+
+func TestIncrDecr(t *testing.T) {
+	key := []byte(fmt.Sprintf("keyINC%d", rand.Int()))
+
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	r := c.Increment(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
+	assert.NoError(t, r.Err())
+	assert.Equal(t, uint64(1000), binary.BigEndian.Uint64(r.Value()))
+
+	r = c.Increment(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
+	assert.NoError(t, r.Err())
+	assert.Equal(t, uint64(1100), binary.BigEndian.Uint64(r.Value()))
+
+	r = c.Decrement(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
+	assert.NoError(t, r.Err())
+	assert.Equal(t, uint64(1000), binary.BigEndian.Uint64(r.Value()))
+
+	//clean up
+	c.Delete(ctx, key)
+}
+
+func TestFlush(t *testing.T) {
+	numKeys := 25
+	keys := make([][]byte, numKeys)
+
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	for i := 0; i < numKeys; i++ {
+		keys[i] = []byte(fmt.Sprintf("flushkey%d", i))
+		r := c.Set(ctx, keys[i], []byte(fmt.Sprintf("value%d", i)))
+		assert.NoError(t, r.Err())
+	}
+
+	rr := c.MultiGet(ctx, keys...)
+	assert.Len(t, rr, numKeys)
+	for _, r := range rr {
+		assert.NoError(t, r.Err())
+	}
+
+	r := c.Flush(ctx, []string{"localhost:11211"})
+	assert.NoError(t, r.Err())
+
+	rr = c.MultiGet(ctx, keys...)
+	assert.Len(t, rr, 1)
+	assert.Error(t, rr[0].Err())
 }
