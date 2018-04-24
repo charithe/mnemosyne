@@ -2,7 +2,6 @@ package memcache
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -15,46 +14,8 @@ const (
 	defaultQueueSize = 16
 )
 
-var (
-	ErrInvalidClientConfig = errors.New("Invalid client configuration")
-	ErrNoResult            = errors.New("No result")
-	ErrClientShutdown      = errors.New("Client shutdown")
-
-	ErrKeyNotFound                   = errors.New("Key not found")
-	ErrKeyExists                     = errors.New("Key exists")
-	ErrValueTooLarge                 = errors.New("Value too large")
-	ErrInvalidArguments              = errors.New("Invalid arguments")
-	ErrItemNotStored                 = errors.New("Item not stored")
-	ErrIncrOnNonNumericValue         = errors.New("Incr on non-numeric value")
-	ErrVBucketBelongsToAnotherServer = errors.New("VBucket belongs to another server")
-	ErrAuthenticationError           = errors.New("Authentication error")
-	ErrUnknownCommand                = errors.New("Unknown command")
-	ErrOutOfMemory                   = errors.New("Out of memory")
-	ErrNotSupported                  = errors.New("Not supported")
-	ErrInternalError                 = errors.New("Internal error")
-	ErrBusy                          = errors.New("Busy")
-	ErrTemporaryFailure              = errors.New("Temporary failure")
-)
-
-var statusCodeToErr = map[uint16]error{
-	internal.StatusNoError:                       nil,
-	internal.StatusKeyNotFound:                   ErrKeyNotFound,
-	internal.StatusKeyExists:                     ErrKeyExists,
-	internal.StatusValueTooLarge:                 ErrValueTooLarge,
-	internal.StatusInvalidArguments:              ErrInvalidArguments,
-	internal.StatusItemNotStored:                 ErrItemNotStored,
-	internal.StatusIncrOnNonNumericValue:         ErrIncrOnNonNumericValue,
-	internal.StatusVBucketBelongsToAnotherServer: ErrVBucketBelongsToAnotherServer,
-	internal.StatusAuthenticationError:           ErrAuthenticationError,
-	internal.StatusUnknownCommand:                ErrUnknownCommand,
-	internal.StatusOutOfMemory:                   ErrOutOfMemory,
-	internal.StatusNotSupported:                  ErrNotSupported,
-	internal.StatusInternalError:                 ErrInternalError,
-	internal.StatusBusy:                          ErrBusy,
-	internal.StatusTemporaryFailure:              ErrTemporaryFailure,
-}
-
 // Result represents a result from a single operation
+// Users must always check the return value of Err() before accessing other functions
 type Result interface {
 	fmt.Stringer
 	Err() error
@@ -63,76 +24,10 @@ type Result interface {
 	CAS() uint64
 }
 
-// result implements the Result interface
-type result struct {
-	resp *internal.Response
-}
-
-func (r *result) Key() []byte {
-	return r.resp.Key
-}
-
-func (r *result) Value() []byte {
-	return r.resp.Value
-}
-
-func (r *result) CAS() uint64 {
-	return r.resp.CAS
-}
-
-func (r *result) Err() error {
-	if r.resp.Err != nil {
-		return r.resp.Err
-	}
-
-	return statusCodeToErr[r.resp.StatusCode]
-}
-
-func (r *result) String() string {
-	return fmt.Sprintf("%+v", r.resp)
-}
-
-// Helper functions for creating Result objects
-func newResult(resp *internal.Response) Result {
-	return &result{resp: resp}
-}
-
-func newErrResult(err error) Result {
-	return &result{resp: &internal.Response{Err: err}}
-}
-
-// MutationOpt is an optional modification to apply to the request
-type MutationOpt func(req *internal.Request)
-
-// WithExpiry sets an expiry time for the key being mutated
-func WithExpiry(expiry time.Duration) MutationOpt {
-	return func(req *internal.Request) {
-		extras := internal.NewBuf()
-		switch req.OpCode {
-		case internal.OpIncrement:
-			fallthrough
-		case internal.OpDecrement:
-			fallthrough
-		case internal.OpIncrementQ:
-			fallthrough
-		case internal.OpDecrementQ:
-			fallthrough
-		case internal.OpFlush:
-			fallthrough
-		case internal.OpFlushQ:
-			extras.WriteUint32(uint32(expiry.Seconds()))
-		default:
-			extras.WriteUint32(0)
-			extras.WriteUint32(uint32(expiry.Seconds()))
-		}
-		req.Extras = extras.Bytes()
-	}
-}
-
-func WithCASValue(cas uint64) MutationOpt {
-	return func(req *internal.Request) {
-		req.CAS = cas
-	}
+// NumericResult is returns the numeric results from Increment and Decrement operations
+type NumericResult interface {
+	Result
+	NumericValue() uint64
 }
 
 // Client implements a memcache client that uses the binary protocol
@@ -271,17 +166,17 @@ func (c *Client) MultiDelete(ctx context.Context, keys ...[]byte) []Result {
 
 // Increment performs an INCR operation
 // If the key already exists, the value will be incremented by delta. If the key does not exist, it will be set to initial.
-func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) Result {
+func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) NumericResult {
 	return c.doNumericOp(ctx, internal.OpIncrement, key, initial, delta, mutationOpts...)
 }
 
 // Decrement performs a DECR operation
 // If the key already exists, the value will be decremented by delta. If the key does not exist, it will be set to initial.
-func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) Result {
+func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) NumericResult {
 	return c.doNumericOp(ctx, internal.OpDecrement, key, initial, delta, mutationOpts...)
 }
 
-func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) Result {
+func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) NumericResult {
 	req := &internal.Request{
 		OpCode: opCode,
 		Key:    key,
@@ -295,18 +190,60 @@ func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, init
 	extras.WriteUint64(delta)
 	extras.WriteUint64(initial)
 	if req.Extras != nil {
-		// normally, extras would contain flags (4 bytes) followed by the expiry (4 bytes)
 		extras.Write(req.Extras)
 	} else {
 		extras.WriteUint32(0)
 	}
 	req.Extras = extras.Bytes()
 
+	return c.makeRequest(ctx, req).(NumericResult)
+}
+
+// Append appends the value to the existing value
+func (c *Client) Append(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
+	return c.doUpdateOp(ctx, internal.OpAppend, key, value, mutationOpts...)
+}
+
+// Prepend  prepends the value to the existing value
+func (c *Client) Prepend(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
+	return c.doUpdateOp(ctx, internal.OpPrepend, key, value, mutationOpts...)
+}
+
+func (c *Client) doUpdateOp(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) Result {
+	req := &internal.Request{
+		OpCode: opCode,
+		Key:    key,
+		Value:  value,
+	}
+
+	for _, mo := range mutationOpts {
+		mo(req)
+	}
+	return c.makeRequest(ctx, req)
+}
+
+// Touch sets a new expiry time for the key
+func (c *Client) Touch(ctx context.Context, expiry time.Duration, key []byte) Result {
+	return c.doTouchOp(ctx, internal.OpTouch, expiry, key)
+}
+
+// GetAndTouch gets the key and sets a new expiry time
+func (c *Client) GetAndTouch(ctx context.Context, expiry time.Duration, key []byte) Result {
+	return c.doTouchOp(ctx, internal.OpGAT, expiry, key)
+}
+
+func (c *Client) doTouchOp(ctx context.Context, opCode uint8, expiry time.Duration, key []byte) Result {
+	req := &internal.Request{
+		OpCode: opCode,
+		Key:    key,
+	}
+
+	WithExpiry(expiry)(req)
 	return c.makeRequest(ctx, req)
 }
 
 // Flush flushes all the keys
-func (c *Client) Flush(ctx context.Context, nodeIDs []string, mutationOpts ...MutationOpt) Result {
+func (c *Client) Flush(ctx context.Context, mutationOpts ...MutationOpt) error {
 	req := &internal.Request{
 		OpCode: internal.OpFlush,
 	}
@@ -315,22 +252,17 @@ func (c *Client) Flush(ctx context.Context, nodeIDs []string, mutationOpts ...Mu
 		mo(req)
 	}
 
-	if len(nodeIDs) == 1 {
-		r := c.sendToNode(ctx, nodeIDs[0], req)
-		return r[0]
-	}
-
 	g, newCtx := errgroup.WithContext(ctx)
-	for _, n := range nodeIDs {
-		nid := n
+	c.nodes.Range(func(k, v interface{}) bool {
+		nid := k.(string)
 		g.Go(func() error {
 			r := c.sendToNode(newCtx, nid, req)
 			return r[0].Err()
 		})
-	}
+		return true
+	})
 
-	err := g.Wait()
-	return newErrResult(err)
+	return g.Wait()
 }
 
 // Close closes all connections to the remote nodes and cancels any pending requests
@@ -372,7 +304,7 @@ func (c *Client) makeRequest(ctx context.Context, request *internal.Request) Res
 }
 
 // groups the keys by node and constructs the batch of requests to send
-func (c *Client) groupRequests(quietOpCode, normalOpCode uint8, keys [][]byte) map[string][]*internal.Request {
+func (c *Client) groupRequests(quietOpCode, normalOpCode uint8, keys [][]byte, mutationOpts ...MutationOpt) map[string][]*internal.Request {
 	groups := make(map[string][]*internal.Request)
 	for _, k := range keys {
 		nodeID := c.nodePicker.Pick(k)
@@ -384,7 +316,11 @@ func (c *Client) groupRequests(quietOpCode, normalOpCode uint8, keys [][]byte) m
 			grp[grpSize-1].OpCode = quietOpCode
 		}
 
-		groups[nodeID] = append(grp, &internal.Request{OpCode: normalOpCode, Key: k})
+		req := &internal.Request{OpCode: normalOpCode, Key: k}
+		for _, mo := range mutationOpts {
+			mo(req)
+		}
+		groups[nodeID] = append(grp, req)
 	}
 
 	return groups

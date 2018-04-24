@@ -4,7 +4,6 @@ package memcache
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"testing"
@@ -160,15 +159,15 @@ func TestIncrDecr(t *testing.T) {
 
 	r := c.Increment(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
 	assert.NoError(t, r.Err())
-	assert.Equal(t, uint64(1000), binary.BigEndian.Uint64(r.Value()))
+	assert.Equal(t, uint64(1000), r.NumericValue())
 
 	r = c.Increment(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
 	assert.NoError(t, r.Err())
-	assert.Equal(t, uint64(1100), binary.BigEndian.Uint64(r.Value()))
+	assert.Equal(t, uint64(1100), r.NumericValue())
 
 	r = c.Decrement(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
 	assert.NoError(t, r.Err())
-	assert.Equal(t, uint64(1000), binary.BigEndian.Uint64(r.Value()))
+	assert.Equal(t, uint64(1000), r.NumericValue())
 
 	//clean up
 	c.Delete(ctx, key)
@@ -193,10 +192,53 @@ func TestFlush(t *testing.T) {
 		assert.NoError(t, r.Err())
 	}
 
-	r := c.Flush(ctx, []string{"localhost:11211"})
-	assert.NoError(t, r.Err())
+	err := c.Flush(ctx)
+	assert.NoError(t, err)
 
 	rr = c.MultiGet(ctx, keys...)
 	assert.Len(t, rr, 1)
 	assert.Error(t, rr[0].Err())
+}
+
+func TestAppendAndPrepend(t *testing.T) {
+	key := []byte(fmt.Sprintf("keyAPP%d", rand.Int()))
+
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	r := c.Set(ctx, key, []byte("value"))
+	assert.NoError(t, r.Err())
+
+	r = c.Append(ctx, key, []byte("YYY"), WithCASValue(r.CAS()))
+	assert.NoError(t, r.Err())
+
+	r = c.Prepend(ctx, key, []byte("XXX"), WithCASValue(r.CAS()))
+	assert.NoError(t, r.Err())
+
+	r = c.Get(ctx, key)
+	assert.NoError(t, r.Err())
+	assert.Equal(t, []byte("XXXvalueYYY"), r.Value())
+
+	//clean up
+	c.Delete(ctx, key)
+}
+
+func TestTouchAndGAT(t *testing.T) {
+	key := []byte(fmt.Sprintf("keyTouch%d", rand.Int()))
+
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	r := c.Set(ctx, key, []byte("value"))
+	assert.NoError(t, r.Err())
+
+	r = c.Touch(ctx, 1*time.Hour, key)
+	assert.NoError(t, r.Err())
+
+	r = c.GetAndTouch(ctx, 1*time.Hour, key)
+	assert.NoError(t, r.Err())
+	assert.Equal(t, []byte("value"), r.Value())
+
+	//clean up
+	c.Delete(ctx, key)
 }
