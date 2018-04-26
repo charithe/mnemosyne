@@ -334,7 +334,9 @@ func (c *Client) distributeRequests(ctx context.Context, requests map[string][]*
 		n := nodeID
 		b := batch
 		g.Go(func() error {
-			resultChan <- c.sendToNode(newCtx, n, b...)
+			if results := c.sendToNode(newCtx, n, b...); results != nil {
+				resultChan <- results
+			}
 			return nil
 		})
 	}
@@ -350,6 +352,7 @@ func (c *Client) distributeRequests(ctx context.Context, requests map[string][]*
 	for res := range resultChan {
 		results = append(results, res...)
 	}
+
 	return results
 }
 
@@ -374,6 +377,7 @@ func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*int
 	for resp := range respChan {
 		results = append(results, newResult(resp))
 	}
+
 	return results
 }
 

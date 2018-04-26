@@ -1,5 +1,11 @@
 .PHONY: test test_all test_full clean
 
+start_memcached:
+	docker-compose up --scale memcached=3 
+
+stop_memcached: 
+	docker-compose down
+
 test:
 	go test ./...
 

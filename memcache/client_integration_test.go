@@ -17,6 +17,7 @@ var c *Client
 
 func TestMain(m *testing.M) {
 	var err error
+	//c, err = NewSimpleClient("localhost:11211", "localhost:11212", "localhost:11213")
 	c, err = NewSimpleClient("localhost:11211")
 	if err != nil {
 		panic(err)
