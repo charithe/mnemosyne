@@ -68,7 +68,7 @@ func (ms *MockServer) serve() {
 				log.Printf("Done sleeping for %v", scn.Delay)
 				resp = scn.Respond
 			} else {
-				log.Printf("Unexpected request: %#v", req)
+				log.Printf("Unexpected request: Expected=%+v Actual=%+v", scn.Expect, req)
 				resp = &Response{OpCode: req.OpCode, StatusCode: StatusUnknownCommand, Key: req.Key}
 			}
 

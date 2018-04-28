@@ -91,22 +91,22 @@ func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 }
 
 // Set inserts or overwrites the value pointed to by the key
-func (c *Client) Set(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
+func (c *Client) Set(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
 	return c.doMutation(ctx, internal.OpSet, key, value, mutationOpts...)
 }
 
 // Add inserts the value iff the key doesn't already exist
-func (c *Client) Add(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
+func (c *Client) Add(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
 	return c.doMutation(ctx, internal.OpAdd, key, value, mutationOpts...)
 }
 
 // Replace overwrites the value iff the key already exists
-func (c *Client) Replace(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
+func (c *Client) Replace(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
 	return c.doMutation(ctx, internal.OpReplace, key, value, mutationOpts...)
 }
 
 // helper for mutations (SET, ADD, REPLACE)
-func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) Result {
+func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
 	req := &internal.Request{OpCode: opCode, Key: key, Value: value}
 	for _, mo := range mutationOpts {
 		mo(req)
@@ -121,7 +121,7 @@ func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte
 }
 
 // Get performs a GET for the given key
-func (c *Client) Get(ctx context.Context, key []byte) Result {
+func (c *Client) Get(ctx context.Context, key []byte) (Result, error) {
 	req := &internal.Request{
 		OpCode: internal.OpGetK,
 		Key:    key,
@@ -131,11 +131,15 @@ func (c *Client) Get(ctx context.Context, key []byte) Result {
 }
 
 // MultiGet performs a lookup for a set of keys and returns the found values
-func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) []Result {
+// if error is an instance of *memcache.Error, partial results may be available in the result array
+func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]Result, error) {
 	// we can short-circuit a lot of code if there's only one key to lookup
 	if len(keys) == 1 {
-		res := c.Get(ctx, keys[0])
-		return []Result{res}
+		res, err := c.Get(ctx, keys[0])
+		if res != nil {
+			return []Result{res}, err
+		}
+		return nil, err
 	}
 
 	groups := c.groupRequests(internal.OpGetKQ, internal.OpGetK, keys)
@@ -143,40 +147,41 @@ func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) []Result {
 }
 
 // Delete performs a DELETE for the given key
-func (c *Client) Delete(ctx context.Context, key []byte) Result {
+func (c *Client) Delete(ctx context.Context, key []byte) error {
 	req := &internal.Request{
 		OpCode: internal.OpDelete,
 		Key:    key,
 	}
 
-	return c.makeRequest(ctx, req)
+	_, err := c.makeRequest(ctx, req)
+	return err
 }
 
 // MultiDelete performs a batch delete of the keys
-func (c *Client) MultiDelete(ctx context.Context, keys ...[]byte) []Result {
+func (c *Client) MultiDelete(ctx context.Context, keys ...[]byte) error {
 	// we can short-circuit a lot of code if there's only one key to delete
 	if len(keys) == 1 {
-		res := c.Delete(ctx, keys[0])
-		return []Result{res}
+		return c.Delete(ctx, keys[0])
 	}
 
 	groups := c.groupRequests(internal.OpDeleteQ, internal.OpDelete, keys)
-	return c.distributeRequests(ctx, groups)
+	_, err := c.distributeRequests(ctx, groups)
+	return err
 }
 
 // Increment performs an INCR operation
 // If the key already exists, the value will be incremented by delta. If the key does not exist, it will be set to initial.
-func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) NumericResult {
+func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
 	return c.doNumericOp(ctx, internal.OpIncrement, key, initial, delta, mutationOpts...)
 }
 
 // Decrement performs a DECR operation
 // If the key already exists, the value will be decremented by delta. If the key does not exist, it will be set to initial.
-func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) NumericResult {
+func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
 	return c.doNumericOp(ctx, internal.OpDecrement, key, initial, delta, mutationOpts...)
 }
 
-func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) NumericResult {
+func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
 	req := &internal.Request{
 		OpCode: opCode,
 		Key:    key,
@@ -196,20 +201,24 @@ func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, init
 	}
 	req.Extras = extras.Bytes()
 
-	return c.makeRequest(ctx, req).(NumericResult)
+	r, err := c.makeRequest(ctx, req)
+	if r != nil {
+		return r.(NumericResult), err
+	}
+	return nil, err
 }
 
 // Append appends the value to the existing value
-func (c *Client) Append(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
+func (c *Client) Append(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
 	return c.doUpdateOp(ctx, internal.OpAppend, key, value, mutationOpts...)
 }
 
 // Prepend  prepends the value to the existing value
-func (c *Client) Prepend(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) Result {
+func (c *Client) Prepend(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
 	return c.doUpdateOp(ctx, internal.OpPrepend, key, value, mutationOpts...)
 }
 
-func (c *Client) doUpdateOp(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) Result {
+func (c *Client) doUpdateOp(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
 	req := &internal.Request{
 		OpCode: opCode,
 		Key:    key,
@@ -223,16 +232,17 @@ func (c *Client) doUpdateOp(ctx context.Context, opCode uint8, key, value []byte
 }
 
 // Touch sets a new expiry time for the key
-func (c *Client) Touch(ctx context.Context, expiry time.Duration, key []byte) Result {
-	return c.doTouchOp(ctx, internal.OpTouch, expiry, key)
+func (c *Client) Touch(ctx context.Context, expiry time.Duration, key []byte) error {
+	_, err := c.doTouchOp(ctx, internal.OpTouch, expiry, key)
+	return err
 }
 
 // GetAndTouch gets the key and sets a new expiry time
-func (c *Client) GetAndTouch(ctx context.Context, expiry time.Duration, key []byte) Result {
+func (c *Client) GetAndTouch(ctx context.Context, expiry time.Duration, key []byte) (Result, error) {
 	return c.doTouchOp(ctx, internal.OpGAT, expiry, key)
 }
 
-func (c *Client) doTouchOp(ctx context.Context, opCode uint8, expiry time.Duration, key []byte) Result {
+func (c *Client) doTouchOp(ctx context.Context, opCode uint8, expiry time.Duration, key []byte) (Result, error) {
 	req := &internal.Request{
 		OpCode: opCode,
 		Key:    key,
@@ -256,8 +266,8 @@ func (c *Client) Flush(ctx context.Context, mutationOpts ...MutationOpt) error {
 	c.nodes.Range(func(k, v interface{}) bool {
 		nid := k.(string)
 		g.Go(func() error {
-			r := c.sendToNode(newCtx, nid, req)
-			return r[0].Err()
+			_, err := c.sendToNode(newCtx, nid, req)
+			return err
 		})
 		return true
 	})
@@ -285,22 +295,25 @@ func (c *Client) Close() error {
 	}
 }
 
-func (c *Client) makeRequest(ctx context.Context, request *internal.Request) Result {
+func (c *Client) makeRequest(ctx context.Context, request *internal.Request) (Result, error) {
 	// ensure that the client is not shutdown
 	select {
 	case <-c.shutdownChan:
-		return newErrResult(ErrClientShutdown)
+		return nil, ErrClientShutdown
 	default:
 	}
 
 	// ensure that the context hasn't expired
 	if err := ctx.Err(); err != nil {
-		return newErrResult(err)
+		return nil, err
 	}
 
 	nodeID := c.nodePicker.Pick(request.Key)
-	results := c.sendToNode(ctx, nodeID, request)
-	return results[0]
+	results, err := c.sendToNode(ctx, nodeID, request)
+	if results != nil {
+		return results[0], err
+	}
+	return nil, err
 }
 
 // groups the keys by node and constructs the batch of requests to send
@@ -327,58 +340,82 @@ func (c *Client) groupRequests(quietOpCode, normalOpCode uint8, keys [][]byte, m
 }
 
 // distribute the requests to nodes in parallel
-func (c *Client) distributeRequests(ctx context.Context, requests map[string][]*internal.Request) []Result {
+func (c *Client) distributeRequests(ctx context.Context, requests map[string][]*internal.Request) ([]Result, error) {
 	g, newCtx := errgroup.WithContext(ctx)
-	resultChan := make(chan []Result, len(requests))
+
+	var mu sync.Mutex
+	var results []Result
+	var errors []error
+
 	for nodeID, batch := range requests {
 		n := nodeID
 		b := batch
 		g.Go(func() error {
-			if results := c.sendToNode(newCtx, n, b...); results != nil {
-				resultChan <- results
+			r, err := c.sendToNode(newCtx, n, b...)
+			if err != nil {
+				// If the error is a memcache error, some requests may have succeeded
+				if _, ok := err.(*Error); ok {
+					mu.Lock()
+					results = append(results, r...)
+					errors = append(errors, err)
+					mu.Unlock()
+					return nil
+				}
+
+				// Otherwise, we should abort the errgroup to be safe
+				return err
 			}
+
+			mu.Lock()
+			results = append(results, r...)
+			mu.Unlock()
+
 			return nil
 		})
 	}
 
-	err := g.Wait()
-	close(resultChan)
-
-	if err != nil {
-		return []Result{newErrResult(err)}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
-	var results []Result
-	for res := range resultChan {
-		results = append(results, res...)
+	if errors != nil {
+		return results, newErrorFromErrList(errors...)
 	}
 
-	return results
+	return results, nil
 }
 
 // send a batch of requests to a single node
-func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*internal.Request) []Result {
+func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*internal.Request) ([]Result, error) {
 	if err := ctx.Err(); err != nil {
-		return []Result{newErrResult(err)}
+		return nil, err
 	}
 
 	node, err := c.getNode(ctx, nodeID)
 	if err != nil {
-		return []Result{newErrResult(err)}
+		return nil, err
 	}
 
 	respChan := make(chan *internal.Response, len(requests))
 	if err := node.Send(ctx, respChan, requests...); err != nil {
 		close(respChan)
-		return []Result{newErrResult(err)}
+		return nil, err
 	}
 
 	var results []Result
+	var errors []error
 	for resp := range respChan {
-		results = append(results, newResult(resp))
+		r := newResult(resp)
+		if r.Err() != nil {
+			errors = append(errors, &KeyError{Key: r.Key(), Err: r.Err()})
+		}
+		results = append(results, r)
 	}
 
-	return results
+	if errors != nil {
+		return results, newErrorFromErrList(errors...)
+	}
+	return results, nil
 }
 
 func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, error) {

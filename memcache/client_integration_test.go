@@ -17,8 +17,7 @@ var c *Client
 
 func TestMain(m *testing.M) {
 	var err error
-	//c, err = NewSimpleClient("localhost:11211", "localhost:11212", "localhost:11213")
-	c, err = NewSimpleClient("localhost:11211")
+	c, err = NewSimpleClient("localhost:11211", "localhost:11212", "localhost:11213")
 	if err != nil {
 		panic(err)
 	}
@@ -51,11 +50,11 @@ func TestSetGetAndMultiGet(t *testing.T) {
 		t.Run(fmt.Sprintf("%s", tc.key), func(t *testing.T) {
 			ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancelFunc()
-			r := c.Set(ctx, tc.key, tc.value, WithExpiry(1*time.Hour))
-			assert.NoError(t, r.Err())
+			_, err := c.Set(ctx, tc.key, tc.value, WithExpiry(1*time.Hour))
+			assert.NoError(t, err)
 
-			r = c.Get(ctx, tc.key)
-			assert.NoError(t, r.Err())
+			r, err := c.Get(ctx, tc.key)
+			assert.NoError(t, err)
 			assert.Equal(t, tc.key, r.Key())
 			assert.Equal(t, tc.value, r.Value())
 		})
@@ -64,7 +63,8 @@ func TestSetGetAndMultiGet(t *testing.T) {
 	t.Run("MultiGet", func(t *testing.T) {
 		ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelFunc()
-		results := c.MultiGet(ctx, keys...)
+		results, err := c.MultiGet(ctx, keys...)
+		assert.NoError(t, err)
 		assert.Equal(t, numKV, len(results))
 	})
 }
@@ -76,19 +76,18 @@ func TestDelete(t *testing.T) {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelFunc()
 
-	r := c.Set(ctx, key, value, WithExpiry(1*time.Hour))
-	assert.NoError(t, r.Err())
+	_, err := c.Set(ctx, key, value, WithExpiry(1*time.Hour))
+	assert.NoError(t, err)
 
-	r = c.Get(ctx, key)
-	assert.NoError(t, r.Err())
+	r, err := c.Get(ctx, key)
+	assert.NoError(t, err)
 	assert.Equal(t, key, r.Key())
 	assert.Equal(t, value, r.Value())
 
-	r = c.Delete(ctx, key)
-	assert.NoError(t, r.Err())
+	assert.NoError(t, c.Delete(ctx, key))
 
-	r = c.Get(ctx, key)
-	assert.Error(t, r.Err())
+	_, err = c.Get(ctx, key)
+	assert.Error(t, err)
 }
 
 func TestMultiDelete(t *testing.T) {
@@ -100,23 +99,18 @@ func TestMultiDelete(t *testing.T) {
 
 	for i := 0; i < numKeys; i++ {
 		keys[i] = []byte(fmt.Sprintf("delkey%d", i))
-		r := c.Set(ctx, keys[i], []byte(fmt.Sprintf("value%d", i)))
-		assert.NoError(t, r.Err())
+		_, err := c.Set(ctx, keys[i], []byte(fmt.Sprintf("value%d", i)))
+		assert.NoError(t, err)
 	}
 
-	rr := c.MultiGet(ctx, keys...)
+	rr, err := c.MultiGet(ctx, keys...)
+	assert.NoError(t, err)
 	assert.Len(t, rr, numKeys)
-	for _, r := range rr {
-		assert.NoError(t, r.Err())
-	}
 
-	rr = c.MultiDelete(ctx, keys...)
-	assert.Len(t, rr, 1)
-	assert.NoError(t, rr[0].Err())
+	assert.NoError(t, c.MultiDelete(ctx, keys...))
 
-	rr = c.MultiGet(ctx, keys...)
-	assert.Len(t, rr, 1)
-	assert.Error(t, rr[0].Err())
+	_, err = c.MultiGet(ctx, keys...)
+	assert.Error(t, err)
 }
 
 func TestCAS(t *testing.T) {
@@ -125,27 +119,25 @@ func TestCAS(t *testing.T) {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelFunc()
 
-	r := c.Add(ctx, key, []byte("valueXXX"))
-	assert.NoError(t, r.Err())
+	r, err := c.Add(ctx, key, []byte("valueXXX"))
+	assert.NoError(t, err)
 
 	cas := r.CAS()
 
 	// Should succeed because the CAS value matches
-	r = c.Set(ctx, key, []byte("valueXXY"), WithCASValue(cas))
-	assert.NoError(t, r.Err())
+	_, err = c.Set(ctx, key, []byte("valueXXY"), WithCASValue(cas))
+	assert.NoError(t, err)
 
 	// Should fail because the key already exists
-	r = c.Add(ctx, key, []byte("valueXXX"), WithCASValue(cas))
-	assert.Error(t, r.Err())
-	assert.Equal(t, ErrKeyExists, r.Err())
+	_, err = c.Add(ctx, key, []byte("valueXXX"), WithCASValue(cas))
+	assert.Error(t, err)
 
 	// Should fail because the CAS value doesn't match
-	r = c.Set(ctx, key, []byte("valueYYY"), WithCASValue(cas+uint64(1000)))
-	assert.Error(t, r.Err())
-	assert.Equal(t, ErrKeyExists, r.Err())
+	_, err = c.Set(ctx, key, []byte("valueYYY"), WithCASValue(cas+uint64(1000)))
+	assert.Error(t, err)
 
-	r = c.Get(ctx, key)
-	assert.NoError(t, r.Err())
+	r, err = c.Get(ctx, key)
+	assert.NoError(t, err)
 	assert.Equal(t, []byte("valueXXY"), r.Value())
 
 	//clean up
@@ -158,16 +150,16 @@ func TestIncrDecr(t *testing.T) {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelFunc()
 
-	r := c.Increment(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
-	assert.NoError(t, r.Err())
+	r, err := c.Increment(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
+	assert.NoError(t, err)
 	assert.Equal(t, uint64(1000), r.NumericValue())
 
-	r = c.Increment(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
-	assert.NoError(t, r.Err())
+	r, err = c.Increment(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
+	assert.NoError(t, err)
 	assert.Equal(t, uint64(1100), r.NumericValue())
 
-	r = c.Decrement(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
-	assert.NoError(t, r.Err())
+	r, err = c.Decrement(ctx, key, 1000, 100, WithExpiry(2*time.Hour))
+	assert.NoError(t, err)
 	assert.Equal(t, uint64(1000), r.NumericValue())
 
 	//clean up
@@ -183,22 +175,18 @@ func TestFlush(t *testing.T) {
 
 	for i := 0; i < numKeys; i++ {
 		keys[i] = []byte(fmt.Sprintf("flushkey%d", i))
-		r := c.Set(ctx, keys[i], []byte(fmt.Sprintf("value%d", i)))
-		assert.NoError(t, r.Err())
+		_, err := c.Set(ctx, keys[i], []byte(fmt.Sprintf("value%d", i)))
+		assert.NoError(t, err)
 	}
 
-	rr := c.MultiGet(ctx, keys...)
-	assert.Len(t, rr, numKeys)
-	for _, r := range rr {
-		assert.NoError(t, r.Err())
-	}
-
-	err := c.Flush(ctx)
+	rr, err := c.MultiGet(ctx, keys...)
 	assert.NoError(t, err)
+	assert.Len(t, rr, numKeys)
 
-	rr = c.MultiGet(ctx, keys...)
-	assert.Len(t, rr, 1)
-	assert.Error(t, rr[0].Err())
+	assert.NoError(t, c.Flush(ctx))
+
+	rr, err = c.MultiGet(ctx, keys...)
+	assert.Error(t, err)
 }
 
 func TestAppendAndPrepend(t *testing.T) {
@@ -207,17 +195,17 @@ func TestAppendAndPrepend(t *testing.T) {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelFunc()
 
-	r := c.Set(ctx, key, []byte("value"))
-	assert.NoError(t, r.Err())
+	r, err := c.Set(ctx, key, []byte("value"))
+	assert.NoError(t, err)
 
-	r = c.Append(ctx, key, []byte("YYY"), WithCASValue(r.CAS()))
-	assert.NoError(t, r.Err())
+	r, err = c.Append(ctx, key, []byte("YYY"), WithCASValue(r.CAS()))
+	assert.NoError(t, err)
 
-	r = c.Prepend(ctx, key, []byte("XXX"), WithCASValue(r.CAS()))
-	assert.NoError(t, r.Err())
+	r, err = c.Prepend(ctx, key, []byte("XXX"), WithCASValue(r.CAS()))
+	assert.NoError(t, err)
 
-	r = c.Get(ctx, key)
-	assert.NoError(t, r.Err())
+	r, err = c.Get(ctx, key)
+	assert.NoError(t, err)
 	assert.Equal(t, []byte("XXXvalueYYY"), r.Value())
 
 	//clean up
@@ -230,14 +218,14 @@ func TestTouchAndGAT(t *testing.T) {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelFunc()
 
-	r := c.Set(ctx, key, []byte("value"))
-	assert.NoError(t, r.Err())
+	_, err := c.Set(ctx, key, []byte("value"))
+	assert.NoError(t, err)
 
-	r = c.Touch(ctx, 1*time.Hour, key)
-	assert.NoError(t, r.Err())
+	err = c.Touch(ctx, 1*time.Hour, key)
+	assert.NoError(t, err)
 
-	r = c.GetAndTouch(ctx, 1*time.Hour, key)
-	assert.NoError(t, r.Err())
+	r, err := c.GetAndTouch(ctx, 1*time.Hour, key)
+	assert.NoError(t, err)
 	assert.Equal(t, []byte("value"), r.Value())
 
 	//clean up

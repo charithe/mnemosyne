@@ -1,6 +1,7 @@
 package memcache
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -155,4 +156,49 @@ func WithCASValue(cas uint64) MutationOpt {
 	return func(req *internal.Request) {
 		req.CAS = cas
 	}
+}
+
+// keyError represents an error with an individual key
+type KeyError struct {
+	Key []byte
+	Err error
+}
+
+func (ke *KeyError) Error() string {
+	return fmt.Sprintf("Key=%x Error=%v", ke.Key, ke.Err)
+}
+
+// create an Error from a list of errors
+func newErrorFromErrList(errors ...error) error {
+	return &Error{errors: errors}
+}
+
+// create an Error from the message
+func newErrorWithMessage(msg string) error {
+	return &Error{msg: msg}
+}
+
+// Error is a generic error type providing information about individual failures
+type Error struct {
+	errors []error
+	msg    string
+}
+
+func (e *Error) Error() string {
+	if e.msg == "" {
+		b := new(bytes.Buffer)
+		for i, err := range e.errors {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(err.Error())
+		}
+		e.msg = b.String()
+	}
+
+	return e.msg
+}
+
+func (e *Error) Errors() []error {
+	return e.errors
 }
