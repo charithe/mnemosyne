@@ -231,3 +231,53 @@ func TestTouchAndGAT(t *testing.T) {
 	//clean up
 	c.Delete(ctx, key)
 }
+
+/*
+func TestResiliency(t *testing.T) {
+	toxClient := toxiproxy.NewClient("localhost:8474")
+	proxy, err := toxClient.CreateProxy("mc", "localhost:21211", "memcached:11211")
+	if err != nil {
+		t.Fatalf("Can't start toxiproxy: %+v", err)
+	}
+	defer proxy.Delete()
+
+	rc, err := NewSimpleClient("localhost:21211")
+	if err != nil {
+		t.Fatalf("Failed to start client for resiliency test: %+v", err)
+	}
+	defer rc.Close()
+
+	t.Run("reconnect on connection drop", func(t *testing.T) {
+		_, err := rc.Set(context.Background(), []byte("rk1"), []byte("rv1"))
+		assert.NoError(t, err)
+
+		proxy.AddToxic("timeout", "timeout", "", 1.0, toxiproxy.Attributes{
+			"timeout": 300,
+		})
+
+		doWithContext(200*time.Millisecond, func(ctx context.Context) {
+			_, err = rc.Get(ctx, []byte("rk1"))
+			assert.Error(t, err)
+		})
+
+		doWithContext(200*time.Millisecond, func(ctx context.Context) {
+			_, err = rc.Get(ctx, []byte("rk1"))
+			assert.Error(t, err)
+		})
+
+		proxy.RemoveToxic("timeout")
+
+		doWithContext(200*time.Millisecond, func(ctx context.Context) {
+			res, err := rc.Get(ctx, []byte("rk1"))
+			assert.NoError(t, err)
+			assert.Equal(t, []byte("rv1"), res.Value())
+		})
+	})
+}
+
+func doWithContext(timeout time.Duration, f func(ctx context.Context)) {
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelFunc()
+	f(ctx)
+}
+*/

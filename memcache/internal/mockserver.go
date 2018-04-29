@@ -63,9 +63,7 @@ func (ms *MockServer) serve() {
 
 			var resp *Response
 			if requestsEqual(req, scn.Expect) {
-				log.Printf("Sleeping for %v", scn.Delay)
 				time.Sleep(scn.Delay)
-				log.Printf("Done sleeping for %v", scn.Delay)
 				resp = scn.Respond
 			} else {
 				log.Printf("Unexpected request: Expected=%+v Actual=%+v", scn.Expect, req)

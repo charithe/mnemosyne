@@ -19,21 +19,28 @@ type requestBatch struct {
 
 // Node represents a memcached node with an associated request queue
 type Node struct {
+	connectFunc  func(context.Context) (*ConnWrapper, error)
 	conn         *ConnWrapper
 	requests     chan *requestBatch
 	mu           sync.Mutex
 	shutdownChan chan struct{}
 }
 
-func NewNode(conn *ConnWrapper, queueSize int) *Node {
+func NewNode(connectFunc func(context.Context) (*ConnWrapper, error), queueSize int) (*Node, error) {
+	conn, err := connectFunc(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
 	node := &Node{
+		connectFunc:  connectFunc,
 		conn:         conn,
 		requests:     make(chan *requestBatch, queueSize),
 		shutdownChan: make(chan struct{}),
 	}
 
 	go node.requestLoop()
-	return node
+	return node, nil
 }
 
 func (n *Node) Send(ctx context.Context, responseChan chan<- *Response, requests ...*Request) error {
@@ -60,6 +67,7 @@ func (n *Node) requestLoop() {
 
 			// Remove all unprocessed responses from the connection
 			n.conn.FlushReadBuffer()
+
 			// send the new request(s)
 			if len(reqBatch.requests) == 1 {
 				n.processSingleRequest(reqBatch.ctx, reqBatch.responseChan, reqBatch.requests[0])

@@ -291,10 +291,13 @@ func (cw *ConnWrapper) FlushWriteBuffer() error {
 	return cw.bufWriter.Flush()
 }
 
-func (cw *ConnWrapper) FlushReadBuffer() {
+func (cw *ConnWrapper) FlushReadBuffer() error {
 	cw.conn.SetReadDeadline(time.Now())
-	cw.bufReader.Read(cw.tempBuffer)
+	if _, err := cw.bufReader.Read(cw.tempBuffer); err != nil {
+		return err
+	}
 	cw.bufReader.Reset(cw.conn)
+	return nil
 }
 
 func (cw *ConnWrapper) Close() error {

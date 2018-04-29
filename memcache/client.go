@@ -210,15 +210,15 @@ func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, init
 
 // Append appends the value to the existing value
 func (c *Client) Append(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doUpdateOp(ctx, internal.OpAppend, key, value, mutationOpts...)
+	return c.doModifyOp(ctx, internal.OpAppend, key, value, mutationOpts...)
 }
 
 // Prepend  prepends the value to the existing value
 func (c *Client) Prepend(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doUpdateOp(ctx, internal.OpPrepend, key, value, mutationOpts...)
+	return c.doModifyOp(ctx, internal.OpPrepend, key, value, mutationOpts...)
 }
 
-func (c *Client) doUpdateOp(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
+func (c *Client) doModifyOp(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
 	req := &internal.Request{
 		OpCode: opCode,
 		Key:    key,
@@ -287,6 +287,8 @@ func (c *Client) Close() error {
 	default:
 		close(c.shutdownChan)
 		c.nodes.Range(func(k, v interface{}) bool {
+			nodeID := k.(string)
+			c.sendToNode(context.Background(), nodeID, &internal.Request{OpCode: internal.OpQuit})
 			node := v.(*internal.Node)
 			node.Shutdown()
 			return true
@@ -352,30 +354,21 @@ func (c *Client) distributeRequests(ctx context.Context, requests map[string][]*
 		b := batch
 		g.Go(func() error {
 			r, err := c.sendToNode(newCtx, n, b...)
-			if err != nil {
-				// If the error is a memcache error, some requests may have succeeded
-				if _, ok := err.(*Error); ok {
-					mu.Lock()
-					results = append(results, r...)
-					errors = append(errors, err)
-					mu.Unlock()
-					return nil
-				}
-
-				// Otherwise, we should abort the errgroup to be safe
-				return err
+			mu.Lock()
+			if r != nil {
+				results = append(results, r...)
 			}
 
-			mu.Lock()
-			results = append(results, r...)
+			if err != nil {
+				errors = append(errors, err)
+			}
 			mu.Unlock()
-
 			return nil
 		})
 	}
 
 	if err := g.Wait(); err != nil {
-		return nil, err
+		return results, err
 	}
 
 	if errors != nil {
@@ -424,14 +417,17 @@ func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, er
 		return node.(*internal.Node), nil
 	}
 
-	conn, err := c.connector.Connect(ctx, nodeID)
-	if err != nil {
-		return nil, err
+	connFunc := func(ctx context.Context) (*internal.ConnWrapper, error) {
+		conn, err := c.connector.Connect(ctx, nodeID)
+		if err != nil {
+			return nil, err
+		}
+
+		return internal.NewConnWrapper(conn, c.bufPool), nil
 	}
 
-	newNode := internal.NewNode(internal.NewConnWrapper(conn, c.bufPool), c.queueSize)
+	newNode, err := internal.NewNode(connFunc, c.queueSize)
 	if err != nil {
-		conn.Close()
 		return nil, err
 	}
 

@@ -1,5 +1,10 @@
 version: "3"
 services:
+  toxiproxy:
+    image: shopify/toxiproxy
+    ports:
+      - "8474:8474"
+      - "21211:21211"
   memcached:
     image: memcached:alpine
     command:
