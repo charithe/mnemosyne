@@ -3,7 +3,10 @@ package internal
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
+
+	"github.com/fatih/pool"
 )
 
 var (
@@ -19,22 +22,22 @@ type requestBatch struct {
 
 // Node represents a memcached node with an associated request queue
 type Node struct {
-	connectFunc  func(context.Context) (*ConnWrapper, error)
-	conn         *ConnWrapper
+	connPool     pool.Pool
+	bufPool      *BufPool
 	requests     chan *requestBatch
 	mu           sync.Mutex
 	shutdownChan chan struct{}
 }
 
-func NewNode(connectFunc func(context.Context) (*ConnWrapper, error), queueSize int) (*Node, error) {
-	conn, err := connectFunc(context.Background())
+func NewNode(bufPool *BufPool, connectFunc func() (net.Conn, error), queueSize int, initialConns int, maxConns int) (*Node, error) {
+	connPool, err := pool.NewChannelPool(initialConns, maxConns, connectFunc)
 	if err != nil {
 		return nil, err
 	}
 
 	node := &Node{
-		connectFunc:  connectFunc,
-		conn:         conn,
+		connPool:     connPool,
+		bufPool:      bufPool,
 		requests:     make(chan *requestBatch, queueSize),
 		shutdownChan: make(chan struct{}),
 	}
@@ -61,12 +64,8 @@ func (n *Node) requestLoop() {
 			return
 		case reqBatch, ok := <-n.requests:
 			if !ok {
-				// request channel has been closed.
 				return
 			}
-
-			// Remove all unprocessed responses from the connection
-			n.conn.FlushReadBuffer()
 
 			// send the new request(s)
 			if len(reqBatch.requests) == 1 {
@@ -80,26 +79,49 @@ func (n *Node) requestLoop() {
 
 func (n *Node) processSingleRequest(ctx context.Context, responseChan chan<- *Response, req *Request) {
 	defer close(responseChan)
-	if err := n.conn.WritePacket(ctx, req); err != nil {
-		responseChan <- &Response{Key: req.Key, Err: err}
-		return
-	}
 
-	if err := n.conn.FlushWriteBuffer(); err != nil {
-		responseChan <- &Response{Key: req.Key, Err: err}
-		return
-	}
-
-	resp, err := n.conn.ReadPacket(ctx)
+	conn, err := n.connPool.Get()
 	if err != nil {
 		responseChan <- &Response{Key: req.Key, Err: err}
 		return
 	}
 
+	cw := NewConnWrapper(conn, n.bufPool)
+	cw.FlushReadBuffer()
+
+	if err := cw.WritePacket(ctx, req); err != nil {
+		responseChan <- &Response{Key: req.Key, Err: err}
+		cw.Close()
+		return
+	}
+
+	if err := cw.FlushWriteBuffer(); err != nil {
+		responseChan <- &Response{Key: req.Key, Err: err}
+		cw.Close()
+		return
+	}
+
+	resp, err := cw.ReadPacket(ctx)
+	if err != nil {
+		responseChan <- &Response{Key: req.Key, Err: err}
+		cw.Close()
+		return
+	}
+
 	responseChan <- resp
+	cw.Close()
 }
 
 func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Response, requests []*Request) {
+	conn, err := n.connPool.Get()
+	if err != nil {
+		responseChan <- &Response{Err: err}
+		return
+	}
+
+	cw := NewConnWrapper(conn, n.bufPool)
+	cw.FlushReadBuffer()
+
 	pendingReq := make(chan *Request, len(requests))
 	sentinel := uint32(len(requests) - 1)
 
@@ -115,7 +137,7 @@ func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Res
 				return
 			}
 
-			resp, err := n.conn.ReadPacket(ctx)
+			resp, err := cw.ReadPacket(ctx)
 			if err != nil {
 				responseChan <- &Response{Key: pr.Key, Err: err}
 				continue
@@ -139,7 +161,7 @@ func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Res
 		}
 
 		req.Opaque = uint32(i)
-		if err := n.conn.WritePacket(ctx, req); err != nil {
+		if err := cw.WritePacket(ctx, req); err != nil {
 			responseChan <- &Response{Key: req.Key, Err: err}
 			continue
 		}
@@ -148,10 +170,10 @@ func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Res
 	}
 
 	close(pendingReq)
-	//TODO handle flush error
-	n.conn.FlushWriteBuffer()
+	cw.FlushWriteBuffer()
 	wg.Wait()
 	close(responseChan)
+	cw.Close()
 }
 
 func (n *Node) Shutdown() {
@@ -161,5 +183,6 @@ func (n *Node) Shutdown() {
 	case <-n.shutdownChan:
 	default:
 		close(n.shutdownChan)
+		n.connPool.Close()
 	}
 }

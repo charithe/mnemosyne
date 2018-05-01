@@ -39,6 +39,7 @@ make stop_memcached
 To Do
 ------
 
-[] Connection pooling
-[] Resiliency tests
-[] OpenCensus integration
+- [x] Connection pooling
+- [] Resiliency tests
+- [] Benchmarks
+- [] OpenCensus integration
