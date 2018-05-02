@@ -17,7 +17,7 @@ var c *Client
 
 func TestMain(m *testing.M) {
 	var err error
-	c, err = NewSimpleClient("localhost:11211", "localhost:11212", "localhost:11213")
+	c, err = NewClient(WithNodePicker(NewSimpleNodePicker("localhost:11211", "localhost:11212", "localhost:11213")), WithConnectionsPerNode(3))
 	if err != nil {
 		panic(err)
 	}

@@ -3,7 +3,6 @@ package memcache
 import (
 	"context"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
@@ -12,10 +11,9 @@ import (
 )
 
 const (
-	defaultQueueSize           = 16
-	defaultConnectTimeout      = 200 * time.Millisecond
-	defaultInitialConnsPerNode = 1
-	defaultMaxConnsPerNode     = 3
+	defaultQueueSize      = 16
+	defaultConnectTimeout = 200 * time.Millisecond
+	defaultConnsPerNode   = 1
 )
 
 // Result represents a result from a single operation
@@ -36,16 +34,15 @@ type NumericResult interface {
 
 // Client implements a memcache client that uses the binary protocol
 type Client struct {
-	connector           Connector
-	nodePicker          NodePicker
-	queueSize           int
-	connectTimeout      time.Duration
-	initialConnsPerNode int
-	maxConnsPerNode     int
-	nodes               sync.Map
-	bufPool             *internal.BufPool
-	mu                  sync.Mutex
-	shutdownChan        chan struct{}
+	connector      Connector
+	nodePicker     NodePicker
+	queueSize      int
+	connectTimeout time.Duration
+	connsPerNode   int
+	nodes          sync.Map
+	bufPool        *internal.BufPool
+	mu             sync.Mutex
+	shutdownChan   chan struct{}
 }
 
 // ClientOpt defines an option that can be set on a Client object
@@ -79,17 +76,10 @@ func WithConnectTimeout(timeout time.Duration) ClientOpt {
 	}
 }
 
-// WithInitialConnsPerNode sets the number of initial connections to open per node
-func WithInitialConnsPerNode(n int) ClientOpt {
+// WithConnectionsPerNode sets the number of parallel connections to open per node
+func WithConnectionsPerNode(n int) ClientOpt {
 	return func(c *Client) {
-		c.initialConnsPerNode = n
-	}
-}
-
-// WithMaxConnsPerNode sets the maximum number of connections to open per node
-func WithMaxConnsPerNode(n int) ClientOpt {
-	return func(c *Client) {
-		c.maxConnsPerNode = n
+		c.connsPerNode = n
 	}
 }
 
@@ -101,21 +91,20 @@ func NewSimpleClient(nodeAddr ...string) (*Client, error) {
 // NewClient creates a client with the provided options
 func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 	c := &Client{
-		connector:           &SimpleTCPConnector{},
-		queueSize:           defaultQueueSize,
-		connectTimeout:      defaultConnectTimeout,
-		initialConnsPerNode: defaultInitialConnsPerNode,
-		maxConnsPerNode:     defaultMaxConnsPerNode,
-		bufPool:             internal.NewBufPool(),
-		shutdownChan:        make(chan struct{}),
+		connector:      &SimpleTCPConnector{},
+		queueSize:      defaultQueueSize,
+		connectTimeout: defaultConnectTimeout,
+		connsPerNode:   defaultConnsPerNode,
+		bufPool:        internal.NewBufPool(),
+		shutdownChan:   make(chan struct{}),
 	}
 
 	for _, co := range clientOpts {
 		co(c)
 	}
 
-	if c.maxConnsPerNode < c.initialConnsPerNode {
-		c.maxConnsPerNode = c.initialConnsPerNode
+	if c.connsPerNode <= 0 {
+		c.connsPerNode = defaultConnsPerNode
 	}
 
 	if c.connector == nil || c.nodePicker == nil {
@@ -452,20 +441,24 @@ func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, er
 		return node.(*internal.Node), nil
 	}
 
-	connFunc := func() (net.Conn, error) {
+	connFunc := func() (*internal.ConnWrapper, error) {
 		ctx, cancelFunc := context.WithTimeout(context.Background(), c.connectTimeout)
 		defer cancelFunc()
-		return c.connector.Connect(ctx, nodeID)
+		conn, err := c.connector.Connect(ctx, nodeID)
+		if err != nil {
+			return nil, err
+		}
+		return internal.NewConnWrapper(conn, c.bufPool), nil
 	}
 
-	newNode, err := internal.NewNode(c.bufPool, connFunc, c.queueSize, c.initialConnsPerNode, c.maxConnsPerNode)
-	if err != nil {
-		return nil, err
-	}
-
+	newNode := internal.NewNode(connFunc, c.queueSize, c.connsPerNode)
 	node, alreadyExists := c.nodes.LoadOrStore(nodeID, newNode)
 	if alreadyExists {
 		newNode.Shutdown()
+	} else {
+		if err := newNode.Start(); err != nil {
+			return nil, err
+		}
 	}
 
 	return node.(*internal.Node), nil

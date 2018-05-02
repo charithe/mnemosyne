@@ -3,10 +3,7 @@ package internal
 import (
 	"context"
 	"errors"
-	"net"
 	"sync"
-
-	"github.com/fatih/pool"
 )
 
 var (
@@ -22,42 +19,48 @@ type requestBatch struct {
 
 // Node represents a memcached node with an associated request queue
 type Node struct {
-	connPool     pool.Pool
-	bufPool      *BufPool
+	connectFunc  func() (*ConnWrapper, error)
+	numConns     int
 	requests     chan *requestBatch
 	mu           sync.Mutex
 	shutdownChan chan struct{}
 }
 
-func NewNode(bufPool *BufPool, connectFunc func() (net.Conn, error), queueSize int, initialConns int, maxConns int) (*Node, error) {
-	connPool, err := pool.NewChannelPool(initialConns, maxConns, connectFunc)
-	if err != nil {
-		return nil, err
-	}
-
+func NewNode(connectFunc func() (*ConnWrapper, error), queueSize int, numConns int) *Node {
 	node := &Node{
-		connPool:     connPool,
-		bufPool:      bufPool,
+		connectFunc:  connectFunc,
+		numConns:     numConns,
 		requests:     make(chan *requestBatch, queueSize),
 		shutdownChan: make(chan struct{}),
 	}
 
-	go node.requestLoop()
-	return node, nil
+	return node
+}
+
+func (n *Node) Start() error {
+	for i := 0; i < n.numConns; i++ {
+		conn, err := n.connectFunc()
+		if err != nil {
+			n.Shutdown()
+			return err
+		}
+		go n.requestLoop(conn)
+	}
+
+	return nil
 }
 
 func (n *Node) Send(ctx context.Context, responseChan chan<- *Response, requests ...*Request) error {
 	select {
 	case <-n.shutdownChan:
 		return ErrNodeShutdown
-	case <-ctx.Done():
-		return ctx.Err()
 	case n.requests <- &requestBatch{ctx: ctx, requests: requests, responseChan: responseChan}:
 		return nil
 	}
 }
 
-func (n *Node) requestLoop() {
+func (n *Node) requestLoop(conn *ConnWrapper) {
+	defer conn.Close()
 	for {
 		select {
 		case <-n.shutdownChan:
@@ -69,57 +72,49 @@ func (n *Node) requestLoop() {
 
 			// send the new request(s)
 			if len(reqBatch.requests) == 1 {
-				n.processSingleRequest(reqBatch.ctx, reqBatch.responseChan, reqBatch.requests[0])
+				n.processSingleRequest(reqBatch.ctx, conn, reqBatch.responseChan, reqBatch.requests[0])
 			} else {
-				n.processBatchRequest(reqBatch.ctx, reqBatch.responseChan, reqBatch.requests)
+				n.processBatchRequest(reqBatch.ctx, conn, reqBatch.responseChan, reqBatch.requests)
 			}
 		}
 	}
 }
 
-func (n *Node) processSingleRequest(ctx context.Context, responseChan chan<- *Response, req *Request) {
+func (n *Node) processSingleRequest(ctx context.Context, cw *ConnWrapper, responseChan chan<- *Response, req *Request) {
 	defer close(responseChan)
-
-	conn, err := n.connPool.Get()
-	if err != nil {
-		responseChan <- &Response{Key: req.Key, Err: err}
+	if err := ctx.Err(); err != nil {
+		responseChan <- &Response{Err: err}
 		return
 	}
 
-	cw := NewConnWrapper(conn, n.bufPool)
 	cw.FlushReadBuffer()
 
 	if err := cw.WritePacket(ctx, req); err != nil {
 		responseChan <- &Response{Key: req.Key, Err: err}
-		cw.Close()
 		return
 	}
 
 	if err := cw.FlushWriteBuffer(); err != nil {
 		responseChan <- &Response{Key: req.Key, Err: err}
-		cw.Close()
 		return
 	}
 
 	resp, err := cw.ReadPacket(ctx)
 	if err != nil {
 		responseChan <- &Response{Key: req.Key, Err: err}
-		cw.Close()
 		return
 	}
 
 	responseChan <- resp
-	cw.Close()
 }
 
-func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Response, requests []*Request) {
-	conn, err := n.connPool.Get()
-	if err != nil {
+func (n *Node) processBatchRequest(ctx context.Context, cw *ConnWrapper, responseChan chan<- *Response, requests []*Request) {
+	if err := ctx.Err(); err != nil {
 		responseChan <- &Response{Err: err}
+		close(responseChan)
 		return
 	}
 
-	cw := NewConnWrapper(conn, n.bufPool)
 	cw.FlushReadBuffer()
 
 	pendingReq := make(chan *Request, len(requests))
@@ -173,7 +168,6 @@ func (n *Node) processBatchRequest(ctx context.Context, responseChan chan<- *Res
 	cw.FlushWriteBuffer()
 	wg.Wait()
 	close(responseChan)
-	cw.Close()
 }
 
 func (n *Node) Shutdown() {
@@ -183,6 +177,5 @@ func (n *Node) Shutdown() {
 	case <-n.shutdownChan:
 	default:
 		close(n.shutdownChan)
-		n.connPool.Close()
 	}
 }

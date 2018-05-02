@@ -26,12 +26,6 @@
   revision = "e1f439676b570800a863c37b78d1f868f51a85fc"
 
 [[projects]]
-  name = "github.com/fatih/pool"
-  packages = ["."]
-  revision = "010e0b745d12eaf8426c95f9c3924d81dd0b668f"
-  version = "v2.0.0"
-
-[[projects]]
   name = "github.com/pmezard/go-difflib"
   packages = ["difflib"]
   revision = "792786c7400a136282c1664665ae0a8db921c6c2"
@@ -64,6 +58,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "edd0dcdc7999c6417324e3c98588b902e19144c2525d41c0d864253f1964ac7c"
+  inputs-digest = "56dc55ad40d62213f24e880177fdb0acea4f498b738fb9a212156b6172d32ed3"
   solver-name = "gps-cdcl"
   solver-version = 1
