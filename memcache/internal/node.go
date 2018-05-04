@@ -8,6 +8,7 @@ import (
 
 var (
 	ErrNodeShutdown = errors.New("Node shutdown")
+	ErrNodeNotReady = errors.New("Node not ready")
 )
 
 // RequestBatch represents a set of requests that belong to the same group (eg. MultiGet)
@@ -19,16 +20,19 @@ type requestBatch struct {
 
 // Node represents a memcached node with an associated request queue
 type Node struct {
-	connectFunc  func() (*ConnWrapper, error)
+	connectFunc  ConnectFunc
+	bufPool      *BufPool
 	numConns     int
 	requests     chan *requestBatch
-	mu           sync.Mutex
+	wg           sync.WaitGroup
+	mu           sync.RWMutex
 	shutdownChan chan struct{}
 }
 
-func NewNode(connectFunc func() (*ConnWrapper, error), queueSize int, numConns int) *Node {
+func NewNode(connectFunc ConnectFunc, queueSize int, numConns int, bufPool *BufPool) *Node {
 	node := &Node{
 		connectFunc:  connectFunc,
+		bufPool:      bufPool,
 		numConns:     numConns,
 		requests:     make(chan *requestBatch, queueSize),
 		shutdownChan: make(chan struct{}),
@@ -39,28 +43,50 @@ func NewNode(connectFunc func() (*ConnWrapper, error), queueSize int, numConns i
 
 func (n *Node) Start() error {
 	for i := 0; i < n.numConns; i++ {
-		conn, err := n.connectFunc()
+		conn, err := NewConnWrapper(n.connectFunc, n.bufPool)
 		if err != nil {
 			n.Shutdown()
 			return err
 		}
+		n.wg.Add(1)
 		go n.requestLoop(conn)
 	}
 
+	// if all the workers exit, shutdown the node
+	go func() {
+		n.wg.Wait()
+		n.Shutdown()
+	}()
+
 	return nil
+}
+
+func (n *Node) IsShutdown() bool {
+	select {
+	case <-n.shutdownChan:
+		return true
+	default:
+		return false
+	}
 }
 
 func (n *Node) Send(ctx context.Context, responseChan chan<- *Response, requests ...*Request) error {
 	select {
 	case <-n.shutdownChan:
 		return ErrNodeShutdown
+	case <-ctx.Done():
+		return ctx.Err()
 	case n.requests <- &requestBatch{ctx: ctx, requests: requests, responseChan: responseChan}:
 		return nil
 	}
 }
 
 func (n *Node) requestLoop(conn *ConnWrapper) {
-	defer conn.Close()
+	defer func() {
+		conn.Close()
+		n.wg.Done()
+	}()
+
 	for {
 		select {
 		case <-n.shutdownChan:
@@ -75,6 +101,11 @@ func (n *Node) requestLoop(conn *ConnWrapper) {
 				n.processSingleRequest(reqBatch.ctx, conn, reqBatch.responseChan, reqBatch.requests[0])
 			} else {
 				n.processBatchRequest(reqBatch.ctx, conn, reqBatch.responseChan, reqBatch.requests)
+			}
+
+			// if the previous commands failed because of a connection error, try to reconnect
+			if err := conn.ReconnectIfUnhealthy(); err != nil {
+				return
 			}
 		}
 	}
@@ -106,6 +137,7 @@ func (n *Node) processSingleRequest(ctx context.Context, cw *ConnWrapper, respon
 	}
 
 	responseChan <- resp
+	return
 }
 
 func (n *Node) processBatchRequest(ctx context.Context, cw *ConnWrapper, responseChan chan<- *Response, requests []*Request) {

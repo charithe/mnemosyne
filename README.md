@@ -40,7 +40,7 @@ To Do
 ------
 
 - [x] Connection pooling
-- [ ] Resiliency tests
+- [x] Resiliency tests
 - [ ] Benchmarks
 - [ ] OpenCensus integration
 - [ ] CLI

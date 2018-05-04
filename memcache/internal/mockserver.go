@@ -2,7 +2,6 @@ package internal
 
 import (
 	"bytes"
-	"context"
 	"log"
 	"net"
 	"reflect"
@@ -108,8 +107,8 @@ func requestsEqual(r1, r2 *Request) bool {
 type MockConnector struct {
 }
 
-func (mc *MockConnector) Connect(ctx context.Context, nodeID string) (net.Conn, error) {
-	return memconn.DialContext(ctx, "memu", nodeID)
+func (mc *MockConnector) Connect(nodeID string) (net.Conn, error) {
+	return memconn.Dial("memu", nodeID)
 }
 
 // MockNodePicker implements the NodePicker interface

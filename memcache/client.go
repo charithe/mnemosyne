@@ -3,6 +3,7 @@ package memcache
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -11,9 +12,8 @@ import (
 )
 
 const (
-	defaultQueueSize      = 16
-	defaultConnectTimeout = 200 * time.Millisecond
-	defaultConnsPerNode   = 1
+	defaultQueueSize    = 16
+	defaultConnsPerNode = 1
 )
 
 // Result represents a result from a single operation
@@ -69,13 +69,6 @@ func WithQueueSize(queueSize int) ClientOpt {
 	}
 }
 
-// WithConnectTimeout sets the timeout for establishing new connections
-func WithConnectTimeout(timeout time.Duration) ClientOpt {
-	return func(c *Client) {
-		c.connectTimeout = timeout
-	}
-}
-
 // WithConnectionsPerNode sets the number of parallel connections to open per node
 func WithConnectionsPerNode(n int) ClientOpt {
 	return func(c *Client) {
@@ -91,12 +84,11 @@ func NewSimpleClient(nodeAddr ...string) (*Client, error) {
 // NewClient creates a client with the provided options
 func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 	c := &Client{
-		connector:      &SimpleTCPConnector{},
-		queueSize:      defaultQueueSize,
-		connectTimeout: defaultConnectTimeout,
-		connsPerNode:   defaultConnsPerNode,
-		bufPool:        internal.NewBufPool(),
-		shutdownChan:   make(chan struct{}),
+		connector:    NewSimpleTCPConnector(),
+		queueSize:    defaultQueueSize,
+		connsPerNode: defaultConnsPerNode,
+		bufPool:      internal.NewBufPool(),
+		shutdownChan: make(chan struct{}),
 	}
 
 	for _, co := range clientOpts {
@@ -436,22 +428,20 @@ func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*int
 }
 
 func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, error) {
-	node, ok := c.nodes.Load(nodeID)
-	if ok {
-		return node.(*internal.Node), nil
-	}
-
-	connFunc := func() (*internal.ConnWrapper, error) {
-		ctx, cancelFunc := context.WithTimeout(context.Background(), c.connectTimeout)
-		defer cancelFunc()
-		conn, err := c.connector.Connect(ctx, nodeID)
-		if err != nil {
-			return nil, err
+	if node, ok := c.nodes.Load(nodeID); ok {
+		n := node.(*internal.Node)
+		if !n.IsShutdown() {
+			return n, nil
 		}
-		return internal.NewConnWrapper(conn, c.bufPool), nil
+
+		c.nodes.Delete(nodeID)
 	}
 
-	newNode := internal.NewNode(connFunc, c.queueSize, c.connsPerNode)
+	connectFunc := func() (net.Conn, error) {
+		return c.connector.Connect(nodeID)
+	}
+
+	newNode := internal.NewNode(connectFunc, c.queueSize, c.connsPerNode, c.bufPool)
 	node, alreadyExists := c.nodes.LoadOrStore(nodeID, newNode)
 	if alreadyExists {
 		newNode.Shutdown()

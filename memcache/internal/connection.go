@@ -10,10 +10,12 @@ import (
 )
 
 const (
-	headerSize           = 24
-	defaultReadDeadline  = 200 * time.Millisecond
-	defaultWriteDeadline = 200 * time.Millisecond
-	tempBufferSize       = 256
+	headerSize            = 24
+	connRetryWaitDuration = 200 * time.Millisecond
+	defaultReadDeadline   = 200 * time.Millisecond
+	defaultWriteDeadline  = 200 * time.Millisecond
+	numConnectRetries     = 3
+	tempBufferSize        = 256
 )
 
 var (
@@ -23,40 +25,34 @@ var (
 	ErrUnexpectedRequest  = errors.New("Unexpected request")
 )
 
-// Connecction is a physical connection to a memcache server
-type Connection interface {
-	io.ReadWriteCloser
-	SetReadDeadline(t time.Time) error
-	SetWriteDeadline(t time.Time) error
-}
+type ConnectFunc func() (net.Conn, error)
 
 // ConnWrapper wraps a connection and provides convenient packet read/write functions
 type ConnWrapper struct {
 	net.Conn
-	reqID      uint32
-	conn       Connection
-	bufReader  *bufio.Reader
-	bufWriter  *bufio.Writer
-	bufPool    *BufPool
-	tempBuffer []byte
+	connectFunc ConnectFunc
+	bufReader   *bufio.Reader
+	bufWriter   *bufio.Writer
+	bufPool     *BufPool
+	tempBuffer  []byte
+	healthy     bool
 }
 
-func NewConnWrapper(conn net.Conn, bufPool *BufPool) *ConnWrapper {
+func NewConnWrapper(connectFunc ConnectFunc, bufPool *BufPool) (*ConnWrapper, error) {
+	conn, err := connectFunc()
+	if err != nil {
+		return nil, err
+	}
+
 	return &ConnWrapper{
-		Conn:       conn,
-		bufReader:  bufio.NewReader(conn),
-		bufWriter:  bufio.NewWriter(conn),
-		bufPool:    bufPool,
-		tempBuffer: make([]byte, tempBufferSize),
-	}
-}
-
-func (cw *ConnWrapper) Check(ctx context.Context) error {
-	req := &Request{
-		OpCode: OpNoOp,
-	}
-
-	return cw.WritePacket(ctx, req)
+		Conn:        conn,
+		connectFunc: connectFunc,
+		bufReader:   bufio.NewReader(conn),
+		bufWriter:   bufio.NewWriter(conn),
+		bufPool:     bufPool,
+		tempBuffer:  make([]byte, tempBufferSize),
+		healthy:     true,
+	}, nil
 }
 
 func (cw *ConnWrapper) ReadPacket(ctx context.Context) (pkt *Response, err error) {
@@ -72,6 +68,7 @@ func (cw *ConnWrapper) ReadPacket(ctx context.Context) (pkt *Response, err error
 	cw.SetReadDeadline(dl)
 	b := NewBuf()
 	pkt, err = ParseResponse(cw.bufReader, b)
+	cw.checkError(err)
 	return
 }
 
@@ -92,18 +89,58 @@ func (cw *ConnWrapper) WritePacket(ctx context.Context, pkt *Request) error {
 	_, err := cw.bufWriter.Write(b.Bytes())
 	cw.bufPool.PutBuf(b)
 
+	cw.checkError(err)
 	return err
 }
 
 func (cw *ConnWrapper) FlushWriteBuffer() error {
-	return cw.bufWriter.Flush()
+	err := cw.bufWriter.Flush()
+	cw.checkError(err)
+	return err
 }
 
 func (cw *ConnWrapper) FlushReadBuffer() error {
 	cw.SetReadDeadline(time.Now())
 	if _, err := cw.bufReader.Read(cw.tempBuffer); err != nil {
+		cw.checkError(err)
 		return err
 	}
 	cw.bufReader.Reset(cw)
+	return nil
+}
+
+func (cw *ConnWrapper) checkError(err error) {
+	if err == nil {
+		return
+	}
+
+	if err == io.EOF {
+		cw.healthy = false
+		return
+	}
+
+	if neterr, ok := err.(net.Error); ok {
+		if !neterr.Temporary() {
+			cw.healthy = false
+			return
+		}
+	}
+}
+
+func (cw *ConnWrapper) ReconnectIfUnhealthy() error {
+	if cw.healthy {
+		return nil
+	}
+
+	cw.Conn.Close()
+	conn, err := cw.connectFunc()
+	if err != nil {
+		return err
+	}
+
+	cw.Conn = conn
+	cw.healthy = true
+	cw.bufReader.Reset(cw.Conn)
+	cw.bufWriter.Reset(cw.Conn)
 	return nil
 }

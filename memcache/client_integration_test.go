@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	toxiproxy "github.com/Shopify/toxiproxy/client"
+	"github.com/eapache/go-resiliency/retrier"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/exp/rand"
 )
@@ -232,52 +234,108 @@ func TestTouchAndGAT(t *testing.T) {
 	c.Delete(ctx, key)
 }
 
-/*
 func TestResiliency(t *testing.T) {
 	toxClient := toxiproxy.NewClient("localhost:8474")
-	proxy, err := toxClient.CreateProxy("mc", "localhost:21211", "memcached:11211")
+	proxy, err := toxClient.CreateProxy("mc", ":21211", "resiliency:11211")
 	if err != nil {
 		t.Fatalf("Can't start toxiproxy: %+v", err)
 	}
 	defer proxy.Delete()
 
 	rc, err := NewSimpleClient("localhost:21211")
+	//rc, err := NewClient(WithNodePicker(NewSimpleNodePicker("localhost:21211")), WithConnectionsPerNode(3))
 	if err != nil {
 		t.Fatalf("Failed to start client for resiliency test: %+v", err)
 	}
 	defer rc.Close()
 
 	t.Run("reconnect on connection drop", func(t *testing.T) {
-		_, err := rc.Set(context.Background(), []byte("rk1"), []byte("rv1"))
-		assert.NoError(t, err)
+		ctxTimeout := 100 * time.Millisecond
 
-		proxy.AddToxic("timeout", "timeout", "", 1.0, toxiproxy.Attributes{
-			"timeout": 300,
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err := rc.Set(ctx, []byte("rk1"), []byte("rv1"))
+			assert.NoError(t, err)
 		})
 
-		doWithContext(200*time.Millisecond, func(ctx context.Context) {
-			_, err = rc.Get(ctx, []byte("rk1"))
-			assert.Error(t, err)
-		})
-
-		doWithContext(200*time.Millisecond, func(ctx context.Context) {
-			_, err = rc.Get(ctx, []byte("rk1"))
-			assert.Error(t, err)
-		})
-
-		proxy.RemoveToxic("timeout")
-
-		doWithContext(200*time.Millisecond, func(ctx context.Context) {
+		doWithContext(ctxTimeout, func(ctx context.Context) {
 			res, err := rc.Get(ctx, []byte("rk1"))
 			assert.NoError(t, err)
 			assert.Equal(t, []byte("rv1"), res.Value())
 		})
+
+		proxy.Disable()
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err = rc.Get(ctx, []byte("rk1"))
+			assert.Error(t, err)
+		})
+
+		proxy.Enable()
+
+		// reestablishing the connection is not instantaneous so we have to try a couple of times
+		retry := retrier.New(retrier.ExponentialBackoff(3, 100*time.Millisecond), nil)
+		var res Result
+		err := retry.Run(func() error {
+			var err error
+			doWithContext(ctxTimeout, func(ctx context.Context) {
+				res, err = rc.Get(ctx, []byte("rk1"))
+			})
+			return err
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("rv1"), res.Value())
+	})
+
+	t.Run("reconnect on connection timeout", func(t *testing.T) {
+		ctxTimeout := 100 * time.Millisecond
+		connTimeout := 100
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err := rc.Set(ctx, []byte("rk2"), []byte("rv2"))
+			assert.NoError(t, err)
+		})
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			res, err := rc.Get(ctx, []byte("rk2"))
+			assert.NoError(t, err)
+			assert.Equal(t, []byte("rv2"), res.Value())
+		})
+
+		proxy.AddToxic("test_timeout", "timeout", "upstream", 1.0, toxiproxy.Attributes{
+			"timeout": connTimeout,
+		})
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err = rc.Get(ctx, []byte("rk2"))
+			assert.Error(t, err)
+		})
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err = rc.Get(ctx, []byte("rk2"))
+			assert.Error(t, err)
+		})
+
+		assert.NoError(t, proxy.RemoveToxic("test_timeout"))
+
+		// reestablishing the connection is not instantaneous so we have to try a couple of times
+		retry := retrier.New(retrier.ExponentialBackoff(3, 100*time.Millisecond), nil)
+		var res Result
+		err := retry.Run(func() error {
+			var err error
+			doWithContext(ctxTimeout, func(ctx context.Context) {
+				res, err = rc.Get(ctx, []byte("rk2"))
+			})
+			return err
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("rv2"), res.Value())
 	})
 }
 
 func doWithContext(timeout time.Duration, f func(ctx context.Context)) {
-	ctx, cancelFunc := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancelFunc := context.WithTimeout(context.Background(), timeout)
 	defer cancelFunc()
 	f(ctx)
 }
-*/
