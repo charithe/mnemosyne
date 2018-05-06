@@ -168,7 +168,7 @@ func TestIncrDecr(t *testing.T) {
 	c.Delete(ctx, key)
 }
 
-func TestFlush(t *testing.T) {
+func TestFlushAll(t *testing.T) {
 	numKeys := 25
 	keys := make([][]byte, numKeys)
 
@@ -185,7 +185,7 @@ func TestFlush(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, rr, numKeys)
 
-	assert.NoError(t, c.Flush(ctx))
+	assert.NoError(t, c.FlushAll(ctx))
 
 	rr, err = c.MultiGet(ctx, keys...)
 	assert.Error(t, err)
@@ -232,6 +232,32 @@ func TestTouchAndGAT(t *testing.T) {
 
 	//clean up
 	c.Delete(ctx, key)
+}
+
+func TestStats(t *testing.T) {
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	// Getting all the stats
+	stats, err := c.Stats(ctx, "localhost:11211", "")
+	assert.NoError(t, err)
+	assert.True(t, len(stats) > 0)
+	assert.Contains(t, stats, "max_connections")
+	assert.Contains(t, stats, "total_connections")
+
+	// Getting a group
+	stats, err = c.Stats(ctx, "localhost:11211", "items")
+	assert.NoError(t, err)
+	assert.True(t, len(stats) > 0)
+}
+
+func TestVersion(t *testing.T) {
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	version, err := c.Version(ctx, "localhost:11211")
+	assert.NoError(t, err)
+	assert.NotZero(t, version)
 }
 
 func TestResiliency(t *testing.T) {

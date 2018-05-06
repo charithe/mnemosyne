@@ -131,6 +131,22 @@ func (n *Node) processSingleRequest(ctx context.Context, cw *ConnWrapper, respon
 		return
 	}
 
+	// STAT command results in a series of responses that terminates with an empty packet
+	if req.OpCode == OpStat {
+		for {
+			resp, err := cw.ReadPacket(ctx)
+			if err != nil {
+				responseChan <- &Response{Key: req.Key, Err: err}
+				return
+			}
+
+			if len(resp.Key) == 0 && len(resp.Value) == 0 {
+				return
+			}
+			responseChan <- resp
+		}
+	}
+
 	resp, err := cw.ReadPacket(ctx)
 	if err != nil {
 		responseChan <- &Response{Key: req.Key, Err: err}

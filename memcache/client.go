@@ -268,8 +268,23 @@ func (c *Client) doTouchOp(ctx context.Context, opCode uint8, expiry time.Durati
 	return c.makeRequest(ctx, req)
 }
 
-// Flush flushes all the keys
-func (c *Client) Flush(ctx context.Context, mutationOpts ...MutationOpt) error {
+// FlushAll performs a flush on all the currently known nodes
+// Connections to nodes are loaded lazily as required. This operation only sends the flush command to nodes that  are connected.
+func (c *Client) FlushAll(ctx context.Context, mutationOpts ...MutationOpt) error {
+	g, newCtx := errgroup.WithContext(ctx)
+	c.nodes.Range(func(k, v interface{}) bool {
+		nid := k.(string)
+		g.Go(func() error {
+			return c.Flush(newCtx, nid, mutationOpts...)
+		})
+		return true
+	})
+
+	return g.Wait()
+}
+
+// Flush performs a flush operation on the specified node
+func (c *Client) Flush(ctx context.Context, nodeID string, mutationOpts ...MutationOpt) error {
 	req := &internal.Request{
 		OpCode: internal.OpFlush,
 	}
@@ -278,17 +293,44 @@ func (c *Client) Flush(ctx context.Context, mutationOpts ...MutationOpt) error {
 		mo(req)
 	}
 
-	g, newCtx := errgroup.WithContext(ctx)
-	c.nodes.Range(func(k, v interface{}) bool {
-		nid := k.(string)
-		g.Go(func() error {
-			_, err := c.sendToNode(newCtx, nid, req)
-			return err
-		})
-		return true
-	})
+	_, err := c.sendToNode(ctx, nodeID, req)
+	return err
+}
 
-	return g.Wait()
+// Get the stats from the specified node. Leave itemName empty to get all stats
+func (c *Client) Stats(ctx context.Context, nodeID, itemName string) (map[string]string, error) {
+	req := &internal.Request{
+		OpCode: internal.OpStat,
+	}
+
+	if itemName != "" {
+		req.Key = []byte(itemName)
+	}
+
+	results, err := c.sendToNode(ctx, nodeID, req)
+	if err != nil {
+		return nil, err
+	}
+
+	stats := make(map[string]string)
+	for _, r := range results {
+		stats[string(r.Key())] = string(r.Value())
+	}
+
+	return stats, nil
+}
+
+func (c *Client) Version(ctx context.Context, nodeID string) (string, error) {
+	req := &internal.Request{
+		OpCode: internal.OpVersion,
+	}
+
+	results, err := c.sendToNode(ctx, nodeID, req)
+	if err != nil {
+		return "", err
+	}
+
+	return string(results[0].Value()), nil
 }
 
 // Close closes all connections to the remote nodes and cancels any pending requests

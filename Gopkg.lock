@@ -2,6 +2,12 @@
 
 
 [[projects]]
+  name = "github.com/Shopify/toxiproxy"
+  packages = ["client"]
+  revision = "0b4f0a7eb0cfe79bc83ccbaca6d78172c9bcfc9b"
+  version = "v2.1.3"
+
+[[projects]]
   branch = "master"
   name = "github.com/akutz/memconn"
   packages = ["."]
@@ -24,6 +30,12 @@
   name = "github.com/dgryski/go-jump"
   packages = ["."]
   revision = "e1f439676b570800a863c37b78d1f868f51a85fc"
+
+[[projects]]
+  name = "github.com/eapache/go-resiliency"
+  packages = ["retrier"]
+  revision = "ea41b0fad31007accc7f806884dcdf3da98b79ce"
+  version = "v1.1.0"
 
 [[projects]]
   name = "github.com/pmezard/go-difflib"
@@ -58,6 +70,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "56dc55ad40d62213f24e880177fdb0acea4f498b738fb9a212156b6172d32ed3"
+  inputs-digest = "5a0bdc2738d62754a5d78fc50dfeeec46fa87b96c5a958805ca722fe43a70fa9"
   solver-name = "gps-cdcl"
   solver-version = 1
