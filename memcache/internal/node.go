@@ -29,7 +29,7 @@ type Node struct {
 	shutdownChan chan struct{}
 }
 
-func NewNode(connectFunc ConnectFunc, queueSize int, numConns int, bufPool *BufPool) *Node {
+func NewNode(connectFunc ConnectFunc, queueSize int, numConns int, bufPool *BufPool) (*Node, error) {
 	node := &Node{
 		connectFunc:  connectFunc,
 		bufPool:      bufPool,
@@ -38,10 +38,11 @@ func NewNode(connectFunc ConnectFunc, queueSize int, numConns int, bufPool *BufP
 		shutdownChan: make(chan struct{}),
 	}
 
-	return node
+	err := node.start()
+	return node, err
 }
 
-func (n *Node) Start() error {
+func (n *Node) start() error {
 	for i := 0; i < n.numConns; i++ {
 		conn, err := NewConnWrapper(n.connectFunc, n.bufPool)
 		if err != nil {

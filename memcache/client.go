@@ -437,19 +437,40 @@ func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, er
 		c.nodes.Delete(nodeID)
 	}
 
-	connectFunc := func() (net.Conn, error) {
-		return c.connector.Connect(nodeID)
+	// Initializing the node may take a long time. We need to be mindful of any timeouts set on the context to
+	// avoid blocking the clients
+	type nodeInitResult struct {
+		node *internal.Node
+		err  error
 	}
 
-	newNode := internal.NewNode(connectFunc, c.queueSize, c.connsPerNode, c.bufPool)
-	node, alreadyExists := c.nodes.LoadOrStore(nodeID, newNode)
-	if alreadyExists {
-		newNode.Shutdown()
-	} else {
-		if err := newNode.Start(); err != nil {
-			return nil, err
+	nodeInitChan := make(chan *nodeInitResult)
+	go func() {
+		defer close(nodeInitChan)
+
+		connectFunc := func() (net.Conn, error) {
+			return c.connector.Connect(nodeID)
 		}
-	}
 
-	return node.(*internal.Node), nil
+		newNode, err := internal.NewNode(connectFunc, c.queueSize, c.connsPerNode, c.bufPool)
+		if err != nil {
+			nodeInitChan <- &nodeInitResult{err: err}
+			return
+		}
+
+		// if another thread has beaten us to it, shutdown the newly created node
+		node, alreadyExists := c.nodes.LoadOrStore(nodeID, newNode)
+		if alreadyExists {
+			newNode.Shutdown()
+		}
+
+		nodeInitChan <- &nodeInitResult{node: node.(*internal.Node)}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-nodeInitChan:
+		return result.node, result.err
+	}
 }

@@ -249,6 +249,33 @@ func TestResiliency(t *testing.T) {
 	}
 	defer rc.Close()
 
+	t.Run("recover from initial connection failure", func(t *testing.T) {
+		ctxTimeout := 100 * time.Millisecond
+
+		proxy.Disable()
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			res, _ := rc.Get(ctx, []byte("rk0"))
+			assert.NotEqual(t, ErrKeyNotFound, res.Err())
+		})
+
+		proxy.Enable()
+
+		// toxiproxy operations don't take effect immediately so we have to try a couple of times
+		retry := retrier.New(retrier.ExponentialBackoff(3, 100*time.Millisecond), nil)
+		var res Result
+		err := retry.Run(func() error {
+			var err error
+			doWithContext(ctxTimeout, func(ctx context.Context) {
+				res, err = rc.Get(ctx, []byte("rk0"))
+			})
+			return err
+		})
+
+		assert.Error(t, err)
+		assert.Equal(t, ErrKeyNotFound, res.Err())
+	})
+
 	t.Run("reconnect on connection drop", func(t *testing.T) {
 		ctxTimeout := 100 * time.Millisecond
 
