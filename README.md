@@ -1,12 +1,17 @@
 Mnemosyne
 =========
 
+[![GoDoc](https://godoc.org/github.com/charithe/mnemosyne/memcache?status.svg)](https://godoc.org/github.com/charithe/mnemosyne/memcache)
+
 **Work in progress**
 
 A Go client that speaks the Memcache binary protocol.  
 
 Usage
 -----
+
+See [godocs](https://godoc.org/github.com/charithe/mnemosyne/memcache) for a full example.
+
 
 ```go
 client, err := memcache.NewSimpleClient("host1:11211", "host2:11211")
