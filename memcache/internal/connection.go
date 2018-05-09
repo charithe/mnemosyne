@@ -7,6 +7,9 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/charithe/mnemosyne/ocmemcache"
+	"go.opencensus.io/stats"
 )
 
 const (
@@ -68,7 +71,10 @@ func (cw *ConnWrapper) ReadPacket(ctx context.Context) (pkt *Response, err error
 	cw.SetReadDeadline(dl)
 	b := NewBuf()
 	pkt, err = ParseResponse(cw.bufReader, b)
-	cw.checkError(err)
+	if pkt != nil {
+		stats.Record(ctx, ocmemcache.ResponseBytesMetric.M(float64(len(pkt.Key)+len(pkt.Value)+len(pkt.Extras))))
+	}
+	cw.checkError(ctx, err)
 	return
 }
 
@@ -79,6 +85,7 @@ func (cw *ConnWrapper) WritePacket(ctx context.Context, pkt *Request) error {
 
 	b := cw.bufPool.GetBuf()
 	pkt.AssembleBytes(b)
+	stats.Record(ctx, ocmemcache.RequestBytesMetric.M(float64(len(pkt.Key)+len(pkt.Value)+len(pkt.Extras))))
 
 	dl, ok := ctx.Deadline()
 	if !ok {
@@ -89,38 +96,40 @@ func (cw *ConnWrapper) WritePacket(ctx context.Context, pkt *Request) error {
 	_, err := cw.bufWriter.Write(b.Bytes())
 	cw.bufPool.PutBuf(b)
 
-	cw.checkError(err)
+	cw.checkError(ctx, err)
 	return err
 }
 
 func (cw *ConnWrapper) FlushWriteBuffer() error {
 	err := cw.bufWriter.Flush()
-	cw.checkError(err)
+	cw.checkError(context.Background(), err)
 	return err
 }
 
 func (cw *ConnWrapper) FlushReadBuffer() error {
 	cw.SetReadDeadline(time.Now())
 	if _, err := cw.bufReader.Read(cw.tempBuffer); err != nil {
-		cw.checkError(err)
+		cw.checkError(context.Background(), err)
 		return err
 	}
 	cw.bufReader.Reset(cw)
 	return nil
 }
 
-func (cw *ConnWrapper) checkError(err error) {
+func (cw *ConnWrapper) checkError(ctx context.Context, err error) {
 	if err == nil {
 		return
 	}
 
 	if err == io.EOF {
+		stats.Record(ctx, ocmemcache.ConnectionErrorsMetric.M(1))
 		cw.healthy = false
 		return
 	}
 
 	if neterr, ok := err.(net.Error); ok {
 		if !neterr.Temporary() {
+			stats.Record(ctx, ocmemcache.ConnectionErrorsMetric.M(1))
 			cw.healthy = false
 			return
 		}

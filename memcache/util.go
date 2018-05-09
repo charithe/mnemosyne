@@ -2,17 +2,20 @@ package memcache
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/charithe/mnemosyne/memcache/internal"
+	"github.com/charithe/mnemosyne/ocmemcache"
+	"go.opencensus.io/stats"
+	"go.opencensus.io/tag"
 )
 
 var (
 	ErrInvalidClientConfig = errors.New("Invalid client configuration")
-	ErrNoResult            = errors.New("No result")
 	ErrClientShutdown      = errors.New("Client shutdown")
 
 	ErrKeyNotFound                   = errors.New("Key not found")
@@ -178,7 +181,7 @@ func newErrorWithMessage(msg string) error {
 	return &Error{msg: msg}
 }
 
-// Error is a generic error type providing information about individual failures
+// Error is an error type that aggregates all the errors observed during a request
 type Error struct {
 	errors []error
 	msg    string
@@ -199,6 +202,58 @@ func (e *Error) Error() string {
 	return e.msg
 }
 
+// Accumulated errors during the request
 func (e *Error) Errors() []error {
 	return e.errors
+}
+
+// instrumentSingleOp instruments a single operation using OpenCensus
+func instrumentSingleOp(ctx context.Context, opName string, op func(context.Context) (Result, error)) (Result, error) {
+	newCtx, err := tag.New(ctx, tag.Insert(ocmemcache.OperationKey, opName))
+	if err != nil {
+		newCtx = ctx
+	}
+
+	startTime := time.Now()
+	result, err := op(newCtx)
+	duration := float64(time.Since(startTime)) / float64(time.Millisecond)
+
+	stats.Record(newCtx, ocmemcache.CacheOperationLatencyMetric.M(duration))
+	if err != nil {
+		stats.Record(newCtx, ocmemcache.CacheOperationFailureMetric.M(1))
+	} else {
+		stats.Record(newCtx, ocmemcache.CacheOperationSuccessMetric.M(1))
+	}
+
+	return result, err
+}
+
+// instrumentBatchOp instruments a batch operation using OpenCensus
+func instrumentBatchOp(ctx context.Context, opName string, op func(context.Context) ([]Result, error)) ([]Result, error) {
+	newCtx, err := tag.New(ctx, tag.Insert(ocmemcache.OperationKey, opName))
+	if err != nil {
+		newCtx = ctx
+	}
+
+	startTime := time.Now()
+	results, err := op(newCtx)
+	duration := float64(time.Since(startTime)) / float64(time.Millisecond)
+
+	stats.Record(newCtx, ocmemcache.CacheOperationLatencyMetric.M(duration))
+	if err != nil {
+		stats.Record(newCtx, ocmemcache.CacheOperationFailureMetric.M(1))
+	} else {
+		stats.Record(newCtx, ocmemcache.CacheOperationSuccessMetric.M(1))
+	}
+
+	return results, err
+}
+
+func contextWithNodeID(ctx context.Context, nodeID string) context.Context {
+	newCtx, err := tag.New(ctx, tag.Insert(ocmemcache.NodeKey, nodeID))
+	if err != nil {
+		return ctx
+	}
+
+	return newCtx
 }

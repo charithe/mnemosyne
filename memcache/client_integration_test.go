@@ -10,8 +10,11 @@ import (
 	"time"
 
 	toxiproxy "github.com/Shopify/toxiproxy/client"
+	"github.com/charithe/mnemosyne/ocmemcache"
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/stretchr/testify/assert"
+	"go.opencensus.io/examples/exporter"
+	"go.opencensus.io/stats/view"
 	"golang.org/x/exp/rand"
 )
 
@@ -23,6 +26,10 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+
+	view.Register(ocmemcache.DefaultViews...)
+	view.RegisterExporter(&exporter.PrintExporter{})
+	view.SetReportingPeriod(200 * time.Millisecond)
 
 	retVal := m.Run()
 	c.Close()

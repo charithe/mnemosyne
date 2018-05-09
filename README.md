@@ -62,8 +62,7 @@ To Do
 
 - [x] Connection pooling
 - [x] Resiliency tests
-- [ ] More batch operations
+- [x] OpenCensus metrics
+- [ ] OpenCensus traces
 - [ ] CLI
-- [ ] Documentation
 - [ ] Stress tests
-- [ ] OpenCensus integration

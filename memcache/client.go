@@ -1,3 +1,4 @@
+// Package memcache provides a Memcache binary protocol client library
 package memcache
 
 import (
@@ -108,17 +109,23 @@ func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 
 // Set inserts or overwrites the value pointed to by the key
 func (c *Client) Set(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doMutation(ctx, internal.OpSet, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "set", func(ctx context.Context) (Result, error) {
+		return c.doMutation(ctx, internal.OpSet, key, value, mutationOpts...)
+	})
 }
 
 // Add inserts the value iff the key doesn't already exist
 func (c *Client) Add(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doMutation(ctx, internal.OpAdd, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "add", func(ctx context.Context) (Result, error) {
+		return c.doMutation(ctx, internal.OpAdd, key, value, mutationOpts...)
+	})
 }
 
 // Replace overwrites the value iff the key already exists
 func (c *Client) Replace(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doMutation(ctx, internal.OpReplace, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "replace", func(ctx context.Context) (Result, error) {
+		return c.doMutation(ctx, internal.OpReplace, key, value, mutationOpts...)
+	})
 }
 
 // helper for mutations (SET, ADD, REPLACE)
@@ -138,12 +145,14 @@ func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte
 
 // Get performs a GET for the given key
 func (c *Client) Get(ctx context.Context, key []byte) (Result, error) {
-	req := &internal.Request{
-		OpCode: internal.OpGetK,
-		Key:    key,
-	}
+	return instrumentSingleOp(ctx, "get", func(ctx context.Context) (Result, error) {
+		req := &internal.Request{
+			OpCode: internal.OpGetK,
+			Key:    key,
+		}
 
-	return c.makeRequest(ctx, req)
+		return c.makeRequest(ctx, req)
+	})
 }
 
 // MultiGet performs a lookup for a set of keys and returns the found values
@@ -158,18 +167,22 @@ func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]Result, error)
 		return nil, err
 	}
 
-	groups := c.groupRequests(internal.OpGetKQ, internal.OpGetK, keys)
-	return c.distributeRequests(ctx, groups)
+	return instrumentBatchOp(ctx, "multiget", func(ctx context.Context) ([]Result, error) {
+		groups := c.groupRequests(internal.OpGetKQ, internal.OpGetK, keys)
+		return c.distributeRequests(ctx, groups)
+	})
 }
 
 // Delete performs a DELETE for the given key
 func (c *Client) Delete(ctx context.Context, key []byte) error {
-	req := &internal.Request{
-		OpCode: internal.OpDelete,
-		Key:    key,
-	}
+	_, err := instrumentSingleOp(ctx, "delete", func(ctx context.Context) (Result, error) {
+		req := &internal.Request{
+			OpCode: internal.OpDelete,
+			Key:    key,
+		}
 
-	_, err := c.makeRequest(ctx, req)
+		return c.makeRequest(ctx, req)
+	})
 	return err
 }
 
@@ -180,21 +193,31 @@ func (c *Client) MultiDelete(ctx context.Context, keys ...[]byte) error {
 		return c.Delete(ctx, keys[0])
 	}
 
-	groups := c.groupRequests(internal.OpDeleteQ, internal.OpDelete, keys)
-	_, err := c.distributeRequests(ctx, groups)
+	_, err := instrumentBatchOp(ctx, "multidelete", func(ctx context.Context) ([]Result, error) {
+		groups := c.groupRequests(internal.OpDeleteQ, internal.OpDelete, keys)
+		return c.distributeRequests(ctx, groups)
+	})
 	return err
 }
 
 // Increment performs an INCR operation
 // If the key already exists, the value will be incremented by delta. If the key does not exist, it will be set to initial.
-func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
-	return c.doNumericOp(ctx, internal.OpIncrement, key, initial, delta, mutationOpts...)
+func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (r NumericResult, err error) {
+	instrumentSingleOp(ctx, "increment", func(ctx context.Context) (Result, error) {
+		r, err = c.doNumericOp(ctx, internal.OpIncrement, key, initial, delta, mutationOpts...)
+		return r, err
+	})
+	return
 }
 
 // Decrement performs a DECR operation
 // If the key already exists, the value will be decremented by delta. If the key does not exist, it will be set to initial.
-func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
-	return c.doNumericOp(ctx, internal.OpDecrement, key, initial, delta, mutationOpts...)
+func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (r NumericResult, err error) {
+	instrumentSingleOp(ctx, "add", func(ctx context.Context) (Result, error) {
+		r, err = c.doNumericOp(ctx, internal.OpDecrement, key, initial, delta, mutationOpts...)
+		return r, err
+	})
+	return
 }
 
 func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
@@ -226,12 +249,16 @@ func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, init
 
 // Append appends the value to the existing value
 func (c *Client) Append(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doModifyOp(ctx, internal.OpAppend, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "append", func(ctx context.Context) (Result, error) {
+		return c.doModifyOp(ctx, internal.OpAppend, key, value, mutationOpts...)
+	})
 }
 
 // Prepend  prepends the value to the existing value
 func (c *Client) Prepend(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doModifyOp(ctx, internal.OpPrepend, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "prepend", func(ctx context.Context) (Result, error) {
+		return c.doModifyOp(ctx, internal.OpPrepend, key, value, mutationOpts...)
+	})
 }
 
 func (c *Client) doModifyOp(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
@@ -249,13 +276,17 @@ func (c *Client) doModifyOp(ctx context.Context, opCode uint8, key, value []byte
 
 // Touch sets a new expiry time for the key
 func (c *Client) Touch(ctx context.Context, expiry time.Duration, key []byte) error {
-	_, err := c.doTouchOp(ctx, internal.OpTouch, expiry, key)
+	_, err := instrumentSingleOp(ctx, "touch", func(ctx context.Context) (Result, error) {
+		return c.doTouchOp(ctx, internal.OpTouch, expiry, key)
+	})
 	return err
 }
 
 // GetAndTouch gets the key and sets a new expiry time
 func (c *Client) GetAndTouch(ctx context.Context, expiry time.Duration, key []byte) (Result, error) {
-	return c.doTouchOp(ctx, internal.OpGAT, expiry, key)
+	return instrumentSingleOp(ctx, "get_and_touch", func(ctx context.Context) (Result, error) {
+		return c.doTouchOp(ctx, internal.OpGAT, expiry, key)
+	})
 }
 
 func (c *Client) doTouchOp(ctx context.Context, opCode uint8, expiry time.Duration, key []byte) (Result, error) {
@@ -441,6 +472,8 @@ func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*int
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
+	ctx = contextWithNodeID(ctx, nodeID)
 
 	node, err := c.getNode(ctx, nodeID)
 	if err != nil {
