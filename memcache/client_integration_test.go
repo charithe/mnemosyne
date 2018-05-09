@@ -9,7 +9,12 @@ import (
 	"testing"
 	"time"
 
+	toxiproxy "github.com/Shopify/toxiproxy/client"
+	"github.com/charithe/mnemosyne/ocmemcache"
+	"github.com/eapache/go-resiliency/retrier"
 	"github.com/stretchr/testify/assert"
+	"go.opencensus.io/examples/exporter"
+	"go.opencensus.io/stats/view"
 	"golang.org/x/exp/rand"
 )
 
@@ -17,10 +22,14 @@ var c *Client
 
 func TestMain(m *testing.M) {
 	var err error
-	c, err = NewSimpleClient("localhost:11211", "localhost:11212", "localhost:11213")
+	c, err = NewClient(WithNodePicker(NewSimpleNodePicker("localhost:11211", "localhost:11212", "localhost:11213")), WithConnectionsPerNode(3))
 	if err != nil {
 		panic(err)
 	}
+
+	view.Register(ocmemcache.DefaultViews...)
+	view.RegisterExporter(&exporter.PrintExporter{})
+	view.SetReportingPeriod(200 * time.Millisecond)
 
 	retVal := m.Run()
 	c.Close()
@@ -166,7 +175,7 @@ func TestIncrDecr(t *testing.T) {
 	c.Delete(ctx, key)
 }
 
-func TestFlush(t *testing.T) {
+func TestFlushAll(t *testing.T) {
 	numKeys := 25
 	keys := make([][]byte, numKeys)
 
@@ -183,7 +192,7 @@ func TestFlush(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, rr, numKeys)
 
-	assert.NoError(t, c.Flush(ctx))
+	assert.NoError(t, c.FlushAll(ctx))
 
 	rr, err = c.MultiGet(ctx, keys...)
 	assert.Error(t, err)
@@ -232,52 +241,161 @@ func TestTouchAndGAT(t *testing.T) {
 	c.Delete(ctx, key)
 }
 
-/*
+func TestStats(t *testing.T) {
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	// Getting all the stats
+	stats, err := c.Stats(ctx, "localhost:11211", "")
+	assert.NoError(t, err)
+	assert.True(t, len(stats) > 0)
+	assert.Contains(t, stats, "max_connections")
+	assert.Contains(t, stats, "total_connections")
+
+	// Getting a group
+	stats, err = c.Stats(ctx, "localhost:11211", "items")
+	assert.NoError(t, err)
+	assert.True(t, len(stats) > 0)
+}
+
+func TestVersion(t *testing.T) {
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFunc()
+
+	version, err := c.Version(ctx, "localhost:11211")
+	assert.NoError(t, err)
+	assert.NotZero(t, version)
+}
+
 func TestResiliency(t *testing.T) {
 	toxClient := toxiproxy.NewClient("localhost:8474")
-	proxy, err := toxClient.CreateProxy("mc", "localhost:21211", "memcached:11211")
+	proxy, err := toxClient.CreateProxy("mc", ":21211", "resiliency:11211")
 	if err != nil {
 		t.Fatalf("Can't start toxiproxy: %+v", err)
 	}
 	defer proxy.Delete()
 
 	rc, err := NewSimpleClient("localhost:21211")
+	//rc, err := NewClient(WithNodePicker(NewSimpleNodePicker("localhost:21211")), WithConnectionsPerNode(3))
 	if err != nil {
 		t.Fatalf("Failed to start client for resiliency test: %+v", err)
 	}
 	defer rc.Close()
 
+	t.Run("recover from initial connection failure", func(t *testing.T) {
+		ctxTimeout := 100 * time.Millisecond
+
+		proxy.Disable()
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			res, _ := rc.Get(ctx, []byte("rk0"))
+			assert.NotEqual(t, ErrKeyNotFound, res.Err())
+		})
+
+		proxy.Enable()
+
+		// toxiproxy operations don't take effect immediately so we have to try a couple of times
+		retry := retrier.New(retrier.ExponentialBackoff(3, 100*time.Millisecond), nil)
+		var res Result
+		err := retry.Run(func() error {
+			var err error
+			doWithContext(ctxTimeout, func(ctx context.Context) {
+				res, err = rc.Get(ctx, []byte("rk0"))
+			})
+			return err
+		})
+
+		assert.Error(t, err)
+		assert.Equal(t, ErrKeyNotFound, res.Err())
+	})
+
 	t.Run("reconnect on connection drop", func(t *testing.T) {
-		_, err := rc.Set(context.Background(), []byte("rk1"), []byte("rv1"))
-		assert.NoError(t, err)
+		ctxTimeout := 100 * time.Millisecond
 
-		proxy.AddToxic("timeout", "timeout", "", 1.0, toxiproxy.Attributes{
-			"timeout": 300,
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err := rc.Set(ctx, []byte("rk1"), []byte("rv1"))
+			assert.NoError(t, err)
 		})
 
-		doWithContext(200*time.Millisecond, func(ctx context.Context) {
-			_, err = rc.Get(ctx, []byte("rk1"))
-			assert.Error(t, err)
-		})
-
-		doWithContext(200*time.Millisecond, func(ctx context.Context) {
-			_, err = rc.Get(ctx, []byte("rk1"))
-			assert.Error(t, err)
-		})
-
-		proxy.RemoveToxic("timeout")
-
-		doWithContext(200*time.Millisecond, func(ctx context.Context) {
+		doWithContext(ctxTimeout, func(ctx context.Context) {
 			res, err := rc.Get(ctx, []byte("rk1"))
 			assert.NoError(t, err)
 			assert.Equal(t, []byte("rv1"), res.Value())
 		})
+
+		proxy.Disable()
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err = rc.Get(ctx, []byte("rk1"))
+			assert.Error(t, err)
+		})
+
+		proxy.Enable()
+
+		// reestablishing the connection is not instantaneous so we have to try a couple of times
+		retry := retrier.New(retrier.ExponentialBackoff(3, 100*time.Millisecond), nil)
+		var res Result
+		err := retry.Run(func() error {
+			var err error
+			doWithContext(ctxTimeout, func(ctx context.Context) {
+				res, err = rc.Get(ctx, []byte("rk1"))
+			})
+			return err
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("rv1"), res.Value())
+	})
+
+	t.Run("reconnect on connection timeout", func(t *testing.T) {
+		ctxTimeout := 100 * time.Millisecond
+		connTimeout := 100
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err := rc.Set(ctx, []byte("rk2"), []byte("rv2"))
+			assert.NoError(t, err)
+		})
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			res, err := rc.Get(ctx, []byte("rk2"))
+			assert.NoError(t, err)
+			assert.Equal(t, []byte("rv2"), res.Value())
+		})
+
+		proxy.AddToxic("test_timeout", "timeout", "upstream", 1.0, toxiproxy.Attributes{
+			"timeout": connTimeout,
+		})
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err = rc.Get(ctx, []byte("rk2"))
+			assert.Error(t, err)
+		})
+
+		doWithContext(ctxTimeout, func(ctx context.Context) {
+			_, err = rc.Get(ctx, []byte("rk2"))
+			assert.Error(t, err)
+		})
+
+		assert.NoError(t, proxy.RemoveToxic("test_timeout"))
+
+		// reestablishing the connection is not instantaneous so we have to try a couple of times
+		retry := retrier.New(retrier.ExponentialBackoff(3, 100*time.Millisecond), nil)
+		var res Result
+		err := retry.Run(func() error {
+			var err error
+			doWithContext(ctxTimeout, func(ctx context.Context) {
+				res, err = rc.Get(ctx, []byte("rk2"))
+			})
+			return err
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, []byte("rv2"), res.Value())
 	})
 }
 
 func doWithContext(timeout time.Duration, f func(ctx context.Context)) {
-	ctx, cancelFunc := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancelFunc := context.WithTimeout(context.Background(), timeout)
 	defer cancelFunc()
 	f(ctx)
 }
-*/

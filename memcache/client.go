@@ -1,8 +1,10 @@
+// Package memcache provides a Memcache binary protocol client library
 package memcache
 
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -11,7 +13,8 @@ import (
 )
 
 const (
-	defaultQueueSize = 16
+	defaultQueueSize    = 16
+	defaultConnsPerNode = 1
 )
 
 // Result represents a result from a single operation
@@ -32,13 +35,15 @@ type NumericResult interface {
 
 // Client implements a memcache client that uses the binary protocol
 type Client struct {
-	connector    Connector
-	nodePicker   NodePicker
-	queueSize    int
-	nodes        sync.Map
-	bufPool      *internal.BufPool
-	mu           sync.Mutex
-	shutdownChan chan struct{}
+	connector      Connector
+	nodePicker     NodePicker
+	queueSize      int
+	connectTimeout time.Duration
+	connsPerNode   int
+	nodes          sync.Map
+	bufPool        *internal.BufPool
+	mu             sync.Mutex
+	shutdownChan   chan struct{}
 }
 
 // ClientOpt defines an option that can be set on a Client object
@@ -65,6 +70,13 @@ func WithQueueSize(queueSize int) ClientOpt {
 	}
 }
 
+// WithConnectionsPerNode sets the number of parallel connections to open per node
+func WithConnectionsPerNode(n int) ClientOpt {
+	return func(c *Client) {
+		c.connsPerNode = n
+	}
+}
+
 // NewSimpleClient creates a client that uses the SimpleNodePicker to interact with the given set of memcache nodes
 func NewSimpleClient(nodeAddr ...string) (*Client, error) {
 	return NewClient(WithNodePicker(NewSimpleNodePicker(nodeAddr...)))
@@ -73,14 +85,19 @@ func NewSimpleClient(nodeAddr ...string) (*Client, error) {
 // NewClient creates a client with the provided options
 func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 	c := &Client{
-		connector:    &SimpleTCPConnector{},
+		connector:    NewSimpleTCPConnector(),
 		queueSize:    defaultQueueSize,
+		connsPerNode: defaultConnsPerNode,
 		bufPool:      internal.NewBufPool(),
 		shutdownChan: make(chan struct{}),
 	}
 
 	for _, co := range clientOpts {
 		co(c)
+	}
+
+	if c.connsPerNode <= 0 {
+		c.connsPerNode = defaultConnsPerNode
 	}
 
 	if c.connector == nil || c.nodePicker == nil {
@@ -92,17 +109,23 @@ func NewClient(clientOpts ...ClientOpt) (*Client, error) {
 
 // Set inserts or overwrites the value pointed to by the key
 func (c *Client) Set(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doMutation(ctx, internal.OpSet, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "set", func(ctx context.Context) (Result, error) {
+		return c.doMutation(ctx, internal.OpSet, key, value, mutationOpts...)
+	})
 }
 
 // Add inserts the value iff the key doesn't already exist
 func (c *Client) Add(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doMutation(ctx, internal.OpAdd, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "add", func(ctx context.Context) (Result, error) {
+		return c.doMutation(ctx, internal.OpAdd, key, value, mutationOpts...)
+	})
 }
 
 // Replace overwrites the value iff the key already exists
 func (c *Client) Replace(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doMutation(ctx, internal.OpReplace, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "replace", func(ctx context.Context) (Result, error) {
+		return c.doMutation(ctx, internal.OpReplace, key, value, mutationOpts...)
+	})
 }
 
 // helper for mutations (SET, ADD, REPLACE)
@@ -122,12 +145,14 @@ func (c *Client) doMutation(ctx context.Context, opCode uint8, key, value []byte
 
 // Get performs a GET for the given key
 func (c *Client) Get(ctx context.Context, key []byte) (Result, error) {
-	req := &internal.Request{
-		OpCode: internal.OpGetK,
-		Key:    key,
-	}
+	return instrumentSingleOp(ctx, "get", func(ctx context.Context) (Result, error) {
+		req := &internal.Request{
+			OpCode: internal.OpGetK,
+			Key:    key,
+		}
 
-	return c.makeRequest(ctx, req)
+		return c.makeRequest(ctx, req)
+	})
 }
 
 // MultiGet performs a lookup for a set of keys and returns the found values
@@ -142,18 +167,22 @@ func (c *Client) MultiGet(ctx context.Context, keys ...[]byte) ([]Result, error)
 		return nil, err
 	}
 
-	groups := c.groupRequests(internal.OpGetKQ, internal.OpGetK, keys)
-	return c.distributeRequests(ctx, groups)
+	return instrumentBatchOp(ctx, "multiget", func(ctx context.Context) ([]Result, error) {
+		groups := c.groupRequests(internal.OpGetKQ, internal.OpGetK, keys)
+		return c.distributeRequests(ctx, groups)
+	})
 }
 
 // Delete performs a DELETE for the given key
 func (c *Client) Delete(ctx context.Context, key []byte) error {
-	req := &internal.Request{
-		OpCode: internal.OpDelete,
-		Key:    key,
-	}
+	_, err := instrumentSingleOp(ctx, "delete", func(ctx context.Context) (Result, error) {
+		req := &internal.Request{
+			OpCode: internal.OpDelete,
+			Key:    key,
+		}
 
-	_, err := c.makeRequest(ctx, req)
+		return c.makeRequest(ctx, req)
+	})
 	return err
 }
 
@@ -164,21 +193,31 @@ func (c *Client) MultiDelete(ctx context.Context, keys ...[]byte) error {
 		return c.Delete(ctx, keys[0])
 	}
 
-	groups := c.groupRequests(internal.OpDeleteQ, internal.OpDelete, keys)
-	_, err := c.distributeRequests(ctx, groups)
+	_, err := instrumentBatchOp(ctx, "multidelete", func(ctx context.Context) ([]Result, error) {
+		groups := c.groupRequests(internal.OpDeleteQ, internal.OpDelete, keys)
+		return c.distributeRequests(ctx, groups)
+	})
 	return err
 }
 
 // Increment performs an INCR operation
 // If the key already exists, the value will be incremented by delta. If the key does not exist, it will be set to initial.
-func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
-	return c.doNumericOp(ctx, internal.OpIncrement, key, initial, delta, mutationOpts...)
+func (c *Client) Increment(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (r NumericResult, err error) {
+	instrumentSingleOp(ctx, "increment", func(ctx context.Context) (Result, error) {
+		r, err = c.doNumericOp(ctx, internal.OpIncrement, key, initial, delta, mutationOpts...)
+		return r, err
+	})
+	return
 }
 
 // Decrement performs a DECR operation
 // If the key already exists, the value will be decremented by delta. If the key does not exist, it will be set to initial.
-func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
-	return c.doNumericOp(ctx, internal.OpDecrement, key, initial, delta, mutationOpts...)
+func (c *Client) Decrement(ctx context.Context, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (r NumericResult, err error) {
+	instrumentSingleOp(ctx, "add", func(ctx context.Context) (Result, error) {
+		r, err = c.doNumericOp(ctx, internal.OpDecrement, key, initial, delta, mutationOpts...)
+		return r, err
+	})
+	return
 }
 
 func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, initial, delta uint64, mutationOpts ...MutationOpt) (NumericResult, error) {
@@ -210,12 +249,16 @@ func (c *Client) doNumericOp(ctx context.Context, opCode uint8, key []byte, init
 
 // Append appends the value to the existing value
 func (c *Client) Append(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doModifyOp(ctx, internal.OpAppend, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "append", func(ctx context.Context) (Result, error) {
+		return c.doModifyOp(ctx, internal.OpAppend, key, value, mutationOpts...)
+	})
 }
 
 // Prepend  prepends the value to the existing value
 func (c *Client) Prepend(ctx context.Context, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
-	return c.doModifyOp(ctx, internal.OpPrepend, key, value, mutationOpts...)
+	return instrumentSingleOp(ctx, "prepend", func(ctx context.Context) (Result, error) {
+		return c.doModifyOp(ctx, internal.OpPrepend, key, value, mutationOpts...)
+	})
 }
 
 func (c *Client) doModifyOp(ctx context.Context, opCode uint8, key, value []byte, mutationOpts ...MutationOpt) (Result, error) {
@@ -233,13 +276,17 @@ func (c *Client) doModifyOp(ctx context.Context, opCode uint8, key, value []byte
 
 // Touch sets a new expiry time for the key
 func (c *Client) Touch(ctx context.Context, expiry time.Duration, key []byte) error {
-	_, err := c.doTouchOp(ctx, internal.OpTouch, expiry, key)
+	_, err := instrumentSingleOp(ctx, "touch", func(ctx context.Context) (Result, error) {
+		return c.doTouchOp(ctx, internal.OpTouch, expiry, key)
+	})
 	return err
 }
 
 // GetAndTouch gets the key and sets a new expiry time
 func (c *Client) GetAndTouch(ctx context.Context, expiry time.Duration, key []byte) (Result, error) {
-	return c.doTouchOp(ctx, internal.OpGAT, expiry, key)
+	return instrumentSingleOp(ctx, "get_and_touch", func(ctx context.Context) (Result, error) {
+		return c.doTouchOp(ctx, internal.OpGAT, expiry, key)
+	})
 }
 
 func (c *Client) doTouchOp(ctx context.Context, opCode uint8, expiry time.Duration, key []byte) (Result, error) {
@@ -252,8 +299,23 @@ func (c *Client) doTouchOp(ctx context.Context, opCode uint8, expiry time.Durati
 	return c.makeRequest(ctx, req)
 }
 
-// Flush flushes all the keys
-func (c *Client) Flush(ctx context.Context, mutationOpts ...MutationOpt) error {
+// FlushAll performs a flush on all the currently known nodes
+// Connections to nodes are loaded lazily as required. This operation only sends the flush command to nodes that  are connected.
+func (c *Client) FlushAll(ctx context.Context, mutationOpts ...MutationOpt) error {
+	g, newCtx := errgroup.WithContext(ctx)
+	c.nodes.Range(func(k, v interface{}) bool {
+		nid := k.(string)
+		g.Go(func() error {
+			return c.Flush(newCtx, nid, mutationOpts...)
+		})
+		return true
+	})
+
+	return g.Wait()
+}
+
+// Flush performs a flush operation on the specified node
+func (c *Client) Flush(ctx context.Context, nodeID string, mutationOpts ...MutationOpt) error {
 	req := &internal.Request{
 		OpCode: internal.OpFlush,
 	}
@@ -262,17 +324,44 @@ func (c *Client) Flush(ctx context.Context, mutationOpts ...MutationOpt) error {
 		mo(req)
 	}
 
-	g, newCtx := errgroup.WithContext(ctx)
-	c.nodes.Range(func(k, v interface{}) bool {
-		nid := k.(string)
-		g.Go(func() error {
-			_, err := c.sendToNode(newCtx, nid, req)
-			return err
-		})
-		return true
-	})
+	_, err := c.sendToNode(ctx, nodeID, req)
+	return err
+}
 
-	return g.Wait()
+// Get the stats from the specified node. Leave itemName empty to get all stats
+func (c *Client) Stats(ctx context.Context, nodeID, itemName string) (map[string]string, error) {
+	req := &internal.Request{
+		OpCode: internal.OpStat,
+	}
+
+	if itemName != "" {
+		req.Key = []byte(itemName)
+	}
+
+	results, err := c.sendToNode(ctx, nodeID, req)
+	if err != nil {
+		return nil, err
+	}
+
+	stats := make(map[string]string)
+	for _, r := range results {
+		stats[string(r.Key())] = string(r.Value())
+	}
+
+	return stats, nil
+}
+
+func (c *Client) Version(ctx context.Context, nodeID string) (string, error) {
+	req := &internal.Request{
+		OpCode: internal.OpVersion,
+	}
+
+	results, err := c.sendToNode(ctx, nodeID, req)
+	if err != nil {
+		return "", err
+	}
+
+	return string(results[0].Value()), nil
 }
 
 // Close closes all connections to the remote nodes and cancels any pending requests
@@ -384,6 +473,8 @@ func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*int
 		return nil, err
 	}
 
+	ctx = contextWithNodeID(ctx, nodeID)
+
 	node, err := c.getNode(ctx, nodeID)
 	if err != nil {
 		return nil, err
@@ -412,29 +503,49 @@ func (c *Client) sendToNode(ctx context.Context, nodeID string, requests ...*int
 }
 
 func (c *Client) getNode(ctx context.Context, nodeID string) (*internal.Node, error) {
-	node, ok := c.nodes.Load(nodeID)
-	if ok {
-		return node.(*internal.Node), nil
-	}
-
-	connFunc := func(ctx context.Context) (*internal.ConnWrapper, error) {
-		conn, err := c.connector.Connect(ctx, nodeID)
-		if err != nil {
-			return nil, err
+	if node, ok := c.nodes.Load(nodeID); ok {
+		n := node.(*internal.Node)
+		if !n.IsShutdown() {
+			return n, nil
 		}
 
-		return internal.NewConnWrapper(conn, c.bufPool), nil
+		c.nodes.Delete(nodeID)
 	}
 
-	newNode, err := internal.NewNode(connFunc, c.queueSize)
-	if err != nil {
-		return nil, err
+	// Initializing the node may take a long time. We need to be mindful of any timeouts set on the context to
+	// avoid blocking the clients
+	type nodeInitResult struct {
+		node *internal.Node
+		err  error
 	}
 
-	node, alreadyExists := c.nodes.LoadOrStore(nodeID, newNode)
-	if alreadyExists {
-		newNode.Shutdown()
-	}
+	nodeInitChan := make(chan *nodeInitResult)
+	go func() {
+		defer close(nodeInitChan)
 
-	return node.(*internal.Node), nil
+		connectFunc := func() (net.Conn, error) {
+			return c.connector.Connect(nodeID)
+		}
+
+		newNode, err := internal.NewNode(connectFunc, c.queueSize, c.connsPerNode, c.bufPool)
+		if err != nil {
+			nodeInitChan <- &nodeInitResult{err: err}
+			return
+		}
+
+		// if another thread has beaten us to it, shutdown the newly created node
+		node, alreadyExists := c.nodes.LoadOrStore(nodeID, newNode)
+		if alreadyExists {
+			newNode.Shutdown()
+		}
+
+		nodeInitChan <- &nodeInitResult{node: node.(*internal.Node)}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-nodeInitChan:
+		return result.node, result.err
+	}
 }

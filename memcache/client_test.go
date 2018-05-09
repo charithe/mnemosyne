@@ -117,7 +117,7 @@ func TestSimpleCommands(t *testing.T) {
 				},
 			},
 			clientSession: func(t *testing.T, c *Client, expectedResults []Result) {
-				err := c.Flush(context.Background(), WithExpiry(1*time.Hour))
+				err := c.FlushAll(context.Background(), WithExpiry(1*time.Hour))
 				assert.NoError(t, err)
 			},
 		},

@@ -58,7 +58,12 @@ func newMockConnWrapper() (*ConnWrapper, *mockConn) {
 	mock := &mockConn{
 		Buffer: new(bytes.Buffer),
 	}
+
+	connFunc := func() (net.Conn, error) {
+		return mock, nil
+	}
+
 	bp := NewBufPool()
-	cw := NewConnWrapper(mock, bp)
+	cw, _ := NewConnWrapper(connFunc, bp)
 	return cw, mock
 }
