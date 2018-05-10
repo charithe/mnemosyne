@@ -1,3 +1,4 @@
 /mnemosyne
+/memcache.test
 /vendor/**
 *.swp
