@@ -5,25 +5,25 @@ Mnemosyne
 
 **Work in progress**
 
-A Go client that speaks the Memcache binary protocol.  
+A Memcache binary protocol client designed to improve observability and provide bounded execution times. 
 
 Usage
 -----
 
-See [godocs](https://godoc.org/github.com/charithe/mnemosyne/memcache) for a full example.
+See [godocs](https://godoc.org/github.com/charithe/mnemosyne/memcache) for a full example and information about client parameters.
 
 
 ```go
 client, err := memcache.NewSimpleClient("host1:11211", "host2:11211")
 ...
-// handle error
 ...
-defer client.Close()
-...
-// create context
-...
-if r, err := client.Get(ctx, []byte("key")); err == nil {
-    fmt.Printf("Value=%v\n", r.Value())
+r, err := client.Get(ctx, []byte("key"))
+if err != nil {
+    if r.Err() == memcache.ErrKeyNotFound {
+        log.Printf("Cache miss")
+    }  
+} else {
+    log.Printf("Cache hit [value=%x]", r.Value())
 }
 ```
 
@@ -39,18 +39,26 @@ If the `error` is not nil and is an instance of `*memcache.Error`, some or all o
 Ensure that the `Err()` method returns nil for each result before trusting the output of `Value()` or `NumericValue()`.
 
 
+### OpenCensus Metrics
+
+The `ocmemcache` package contains view definitions for all of the metrics collected by the library. Easiest way to 
+get all of the metrics at once is to register the `ocmemcache.DefaultViews` array.
+
+```go
+view.Register(ocmemcache.DefaultViews...)
+```
+
 
 Development
 -----------
 
-This project uses [dep](https://golang.github.io/dep/) for dependency management.
-
-After checking out the source, run `dep ensure` to download the dependencies.
+This project uses [dep](https://golang.github.io/dep/) for dependency management. After checking out the source, 
+run `dep ensure` to download the dependencies.
 
 
 ### Running Tests
 
-Invoke `make test` to run the unit tests.
+Invoke `make test` to run the unit tests. 
 
 
 To run the integration tests, a Memcache cluster needs to be spun up using [Docker Compose](https://docs.docker.com/compose/) 
@@ -62,6 +70,13 @@ make stop_memcached
 ```
 
 
+For stress testing, the `stress` utility must be installed:
+
+```
+go get -u golang.org/x/tools/cmd/stress
+make stress
+```
+
 To Do
 ------
 
@@ -69,5 +84,6 @@ To Do
 - [x] Resiliency tests
 - [x] OpenCensus metrics
 - [ ] OpenCensus traces
+- [x] Stress tests
 - [ ] CLI
-- [ ] Stress tests
+- [ ] Optimize hot paths

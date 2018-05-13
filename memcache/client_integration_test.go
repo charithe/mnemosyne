@@ -4,32 +4,42 @@ package memcache
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	toxiproxy "github.com/Shopify/toxiproxy/client"
-	"github.com/charithe/mnemosyne/ocmemcache"
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/stretchr/testify/assert"
-	"go.opencensus.io/examples/exporter"
-	"go.opencensus.io/stats/view"
 	"golang.org/x/exp/rand"
 )
 
-var c *Client
+var (
+	c            *Client
+	nodes        = flag.String("nodes", "localhost:11211,localhost:11212,localhost:11213", "Comma separated list of memcache servers")
+	connsPerNode = flag.Int("conns.per.node", 3, "Number of connections per node")
+	maxBatchSize = flag.Int("max.batch.size", 10, "Maximum size of a batch for stress tests")
+	keySize      = flag.Int("key.size", 16, "Key size in bytes for stress tests")
+	valueSize    = flag.Int("value.size", 32, "Value size in bytes for stress tests")
+	reqTimeout   = flag.Duration("req.timeout", 200*time.Millisecond, "Request timeout for stress tests")
+)
 
 func TestMain(m *testing.M) {
+	nodeList := strings.Split(*nodes, ",")
 	var err error
-	c, err = NewClient(WithNodePicker(NewSimpleNodePicker("localhost:11211", "localhost:11212", "localhost:11213")), WithConnectionsPerNode(3))
+	c, err = NewClient(WithNodePicker(NewSimpleNodePicker(nodeList...)), WithConnectionsPerNode(*connsPerNode))
 	if err != nil {
 		panic(err)
 	}
 
-	view.Register(ocmemcache.DefaultViews...)
-	view.RegisterExporter(&exporter.PrintExporter{})
-	view.SetReportingPeriod(200 * time.Millisecond)
+	/*
+		view.Register(ocmemcache.DefaultViews...)
+		view.RegisterExporter(&exporter.PrintExporter{})
+		view.SetReportingPeriod(200 * time.Millisecond)
+	*/
 
 	retVal := m.Run()
 	c.Close()
@@ -394,8 +404,70 @@ func TestResiliency(t *testing.T) {
 	})
 }
 
+func TestRandomLoad(t *testing.T) {
+	batchSize := rand.Intn(*maxBatchSize) + 1
+	keys := make([][]byte, batchSize)
+	values := make([][]byte, batchSize)
+
+	for i := 0; i < batchSize; i++ {
+		keys[i] = make([]byte, *keySize)
+		rand.Read(keys[i])
+
+		values[i] = make([]byte, *valueSize)
+		rand.Read(values[i])
+
+		ctx, cancelFunc := context.WithTimeout(context.Background(), *reqTimeout)
+		_, err := c.Set(ctx, keys[i], values[i], WithExpiry(1*time.Hour))
+		cancelFunc()
+		assert.NoError(t, err)
+	}
+
+	for i := 0; i < batchSize; i++ {
+		ctx, cancelFunc := context.WithTimeout(context.Background(), *reqTimeout)
+		res, err := c.Get(ctx, keys[i])
+		cancelFunc()
+
+		assert.NoError(t, err)
+		assert.Equal(t, values[i], res.Value())
+	}
+}
+
 func doWithContext(timeout time.Duration, f func(ctx context.Context)) {
 	ctx, cancelFunc := context.WithTimeout(context.Background(), timeout)
 	defer cancelFunc()
 	f(ctx)
+}
+
+func BenchmarkClient(b *testing.B) {
+	var keys [100][]byte
+	var vals [100][]byte
+
+	for i := 0; i < 100; i++ {
+		keys[i] = []byte(fmt.Sprintf("benchkey%d", i))
+		vals[i] = []byte(fmt.Sprintf("benchvalue%d", i))
+
+		if _, err := c.Set(context.Background(), keys[i], vals[i]); err != nil {
+			b.Fatal("Failed to do prepare benchmark data")
+		}
+	}
+
+	b.Run("GET", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			c.Get(context.Background(), keys[i%100])
+		}
+	})
+
+	b.Run("MGET", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			start := i % 75
+			end := start + 25
+			c.MultiGet(context.Background(), keys[start:end]...)
+		}
+	})
+
+	b.Run("SET", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			c.Set(context.Background(), keys[i%100], vals[i%100])
+		}
+	})
 }
