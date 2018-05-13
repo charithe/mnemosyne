@@ -1,4 +1,4 @@
-.PHONY: test test_all test_full clean
+.PHONY: start_memcached stop_memcached test test_all test_race bench stress clean
 
 start_memcached:
 	@docker-compose up --scale memcached=3 
@@ -14,6 +14,9 @@ test_all:
 
 test_race:
 	@go test -race -tags=integration ./...
+
+bench:
+	@go test -tags=integration -benchmem -bench=. ./memcache/
 
 stress:
 	@go test -c -tags=integration ./memcache 

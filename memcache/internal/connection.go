@@ -69,8 +69,7 @@ func (cw *ConnWrapper) ReadPacket(ctx context.Context) (pkt *Response, err error
 	}
 
 	cw.SetReadDeadline(dl)
-	b := NewBuf()
-	pkt, err = ParseResponse(cw.bufReader, b)
+	pkt, err = ParseResponse(cw.bufReader)
 	if pkt != nil {
 		stats.Record(ctx, ocmemcache.ResponseBytesMetric.M(float64(len(pkt.Key)+len(pkt.Value)+len(pkt.Extras))))
 	}

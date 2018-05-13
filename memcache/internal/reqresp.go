@@ -15,7 +15,7 @@ type Response struct {
 }
 
 // ParseResponse parses a response from the provided ReadWriter
-func ParseResponse(conn io.Reader, b *Buf) (pkt *Response, err error) {
+func ParseResponse(conn io.Reader) (pkt *Response, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if e, ok := r.(*DecodeErr); ok {
@@ -24,6 +24,7 @@ func ParseResponse(conn io.Reader, b *Buf) (pkt *Response, err error) {
 		}
 	}()
 
+	b := NewBuf()
 	if _, err = io.CopyN(b, conn, headerSize); err != nil {
 		return nil, err
 	}

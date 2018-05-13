@@ -2,3 +2,4 @@
 /memcache.test
 /vendor/**
 *.swp
+*.out

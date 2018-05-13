@@ -4,7 +4,7 @@ services:
     image: memcached:alpine
     command:
       - "memcached"
-      - "-vvv"
+      - "-v"
       - "-B"
       - "binary"
     ports:
@@ -18,6 +18,6 @@ services:
     image: memcached:alpine
     command:
       - "memcached"
-      - "-vvv"
+      - "-v"
       - "-B"
       - "binary"

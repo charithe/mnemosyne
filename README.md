@@ -5,7 +5,7 @@ Mnemosyne
 
 **Work in progress**
 
-A Memcache binary protocol client designed to improve observability and bounded execution times. 
+A Memcache binary protocol client designed to improve observability and provide bounded execution times. 
 
 Usage
 -----
@@ -84,5 +84,6 @@ To Do
 - [x] Resiliency tests
 - [x] OpenCensus metrics
 - [ ] OpenCensus traces
-- [ ] CLI
 - [x] Stress tests
+- [ ] CLI
+- [ ] Optimize hot paths

@@ -437,3 +437,37 @@ func doWithContext(timeout time.Duration, f func(ctx context.Context)) {
 	defer cancelFunc()
 	f(ctx)
 }
+
+func BenchmarkClient(b *testing.B) {
+	var keys [100][]byte
+	var vals [100][]byte
+
+	for i := 0; i < 100; i++ {
+		keys[i] = []byte(fmt.Sprintf("benchkey%d", i))
+		vals[i] = []byte(fmt.Sprintf("benchvalue%d", i))
+
+		if _, err := c.Set(context.Background(), keys[i], vals[i]); err != nil {
+			b.Fatal("Failed to do prepare benchmark data")
+		}
+	}
+
+	b.Run("GET", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			c.Get(context.Background(), keys[i%100])
+		}
+	})
+
+	b.Run("MGET", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			start := i % 75
+			end := start + 25
+			c.MultiGet(context.Background(), keys[start:end]...)
+		}
+	})
+
+	b.Run("SET", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			c.Set(context.Background(), keys[i%100], vals[i%100])
+		}
+	})
+}
