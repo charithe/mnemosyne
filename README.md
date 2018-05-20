@@ -86,4 +86,4 @@ To Do
 - [ ] OpenCensus traces
 - [x] Stress tests
 - [ ] CLI
-- [ ] Optimize hot paths
+- [ ] Compression support
